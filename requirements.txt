@@ -1,0 +1,4 @@
+fastapi
+httpx[http2]
+uvicorn
+gunicorn
