@@ -211,87 +211,33 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
         except Exception as e:
             return None, {"error": str(e)}
 
-async def get_services_from_yclients() -> List[Dict[str, Any]]:
-    """
-    Попытки нескольких общих вариантов запросов к YCLIENTS API.
-    Печатает в лог каждый пробный запрос и ответ — это нужно для диагностики.
-    """
-    YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
+# === Получение списка услуг из YCLIENTS (через USER TOKEN) ===
+async def get_services_from_yclients():
+    YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE or "https://api.yclients.com"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"
+    }
 
-    # Популярные candidate endpoint'ы (используются разными аккаунтами YCLIENTS)
-    candidates = [
-    f"{YCLIENTS_API_BASE_LOCAL}/api/v2/company/{YCLIENTS_COMPANY_ID}/services"
-]
+    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
-    # Соберём варианты заголовков, которые будем пробовать (очень важно логировать)
-    header_variants = []
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=20.0)
+            print(f"YCLIENTS TRY (user_token): {url} STATUS: {response.status_code}", flush=True)
 
-    # Вариант 1: использовать USER token (если есть) — обычно хватает
-    if YCLIENTS_USER_TOKEN:
-        header_variants.append({
-            "name": "user_bearer",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"
-            }
-        })
-
-     # Вариант 3: partner token только (без partner id) — иногда API требует только X-Partner-Token
-    if YCLIENTS_PARTNER_TOKEN:
-        header_variants.append({
-            "name": "x_partner_token_only",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
-            }
-        })
-
-    # Если нет ни одного варианта — выходим
-    if not header_variants:
-        print("YCLIENTS: Нет доступных токенов (USER или PARTNER).", flush=True)
-        return []
-
-    # Пробуем каждый candidate endpoint и каждую комбинацию заголовков
-    for url in candidates:
-        for hv in header_variants:
-            try:
-                print(f"YCLIENTS TRY ({hv['name']}): {url} HEADERS: {hv['headers']}", flush=True)
-                status, content = await fetch_json("GET", url, headers=hv["headers"], timeout=15)
-                print(f"YCLIENTS RESPONSE ({hv['name']}) STATUS: {status} CONTENT: {content}", flush=True)
-            except Exception as e:
-                print("YCLIENTS EXCEPTION:", str(e), flush=True)
-                status, content = None, {"error": str(e)}
-
-            # Успешный ответ — пытаемся распарсить услуги
-            if status in (200, 201) and isinstance(content, dict):
-                items = content.get("data") if isinstance(content.get("data"), list) else content.get("services") or content.get("result") or []
-                services = []
-                for it in items or []:
-                    sid = it.get("id") or it.get("service_id")
-                    title = it.get("title") or it.get("name") or it.get("service_name")
-                    price = it.get("price") or it.get("cost") or it.get("price_value")
-                    category = it.get("category") or it.get("section") or None
-                    services.append({
-                        "id": sid,
-                        "title": title,
-                        "price": price,
-                        "category": category,
-                        "raw": it
-                    })
-                print(f"YCLIENTS: Нашли {len(services)} услуг (вариант {hv['name']})", flush=True)
-                return services
-
-            # Логируем ошибку сервера YCLIENTS (полезно для диагностики)
-            if isinstance(content, dict) and content.get("meta") is not None:
-                print("YCLIENTS meta:", content.get("meta"), flush=True)
-
-    # Ни один вариант не сработал
-    print("YCLIENTS: все варианты запросов к services вернули ошибку.", flush=True)
-    return []
-                
-
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "data" in data:
+                    return data["data"]
+                return data
+            else:
+                print("Ошибка YCLIENTS:", response.status_code, response.text)
+                return None
+    except Exception as e:
+        print("Исключение при запросе YCLIENTS:", str(e))
+        return None
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
     url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/{YCLIENTS_COMPANY_ID}/book_times"
