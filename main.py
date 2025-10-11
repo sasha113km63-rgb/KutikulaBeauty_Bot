@@ -262,6 +262,48 @@ def format_slot_display(dt_str: str) -> str:
         return parsed.strftime("%d.%m.%Y %H:%M")
     except Exception:
         return str(dt_str)
+import httpx
+import os
+
+YCLIENTS_API_BASE = os.environ.get("YCLIENTS_API_BASE", "https://api.yclients.com/api/v1")
+YCLIENTS_COMPANY_ID = os.environ.get("YCLIENTS_COMPANY_ID")
+YCLIENTS_USER_TOKEN = os.environ.get("YCLIENTS_USER_TOKEN")
+YCLIENTS_PARTNER_TOKEN = os.environ.get("YCLIENTS_PARTNER_TOKEN")
+
+async def get_services_from_yclients():
+    """Получить список услуг из YCLIENTS API"""
+    url = f"{YCLIENTS_API_BASE}/services/{YCLIENTS_COMPANY_ID}"
+
+    headers = {
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+        "Partner-Token": YCLIENTS_PARTNER_TOKEN,
+        "Accept": "application/vnd.api.v2+json",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+
+        # 🔍 отладка в логах Render
+        print("YCLIENTS RESPONSE:", response.status_code, response.text[:500], flush=True)
+
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and "data" in data:
+                return data["data"]
+            elif isinstance(data, list):
+                return data
+            else:
+                print("Неожиданная структура данных:", data, flush=True)
+                return []
+        else:
+            print(f"Ошибка при обращении к YCLIENTS API: {response.status_code} — {response.text}", flush=True)
+            return []
+
+    except Exception as e:
+        print("Ошибка при загрузке услуг:", e, flush=True)
+        return []
 async def handle_user_message(chat_id: int, text: str, background_tasks: BackgroundTasks):
     text = (text or "").strip()
     state, data = get_user_state(chat_id)
