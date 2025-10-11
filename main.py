@@ -220,7 +220,7 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "Partner": "11673",  # твой Partner ID
+        "Partner-Id": "11673",  # твой Partner ID — укажи без кавычек если хочешь
         "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
     }
 
