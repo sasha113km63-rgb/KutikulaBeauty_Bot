@@ -237,45 +237,7 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
             }
         })
 
-    # Вариант 2: partner token + partner id (несколько названий заголовка — пробуем)
-    if YCLIENTS_PARTNER_TOKEN and YCLIENTS_COMPANY_ID:
-        header_variants.append({
-            "name": "partner_token_x",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
-            }
-        })
-        header_variants.append({
-            "name": "partner_token_partner-id",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
-                "Partner-Id": f"{YCLIENTS_COMPANY_ID}"
-            }
-        })
-        header_variants.append({
-            "name": "partner_token_partnerid_no_x",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Partner-Id": f"{YCLIENTS_COMPANY_ID}",
-                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
-            }
-        })
-        header_variants.append({
-            "name": "partner_token_partnerid_plain",
-            "headers": {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "PartnerId": f"{YCLIENTS_COMPANY_ID}",
-                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
-            }
-        })
-
-    # Вариант 3: partner token только (без partner id) — иногда API требует только X-Partner-Token
+     # Вариант 3: partner token только (без partner id) — иногда API требует только X-Partner-Token
     if YCLIENTS_PARTNER_TOKEN:
         header_variants.append({
             "name": "x_partner_token_only",
