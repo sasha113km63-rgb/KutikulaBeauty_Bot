@@ -218,12 +218,12 @@ async def get_services_from_yclients() -> List[Dict[str,Any]]:
         f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services/",
     ]
     headers = {
-        "Accept": "application/vnd.api.v2+json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN or ''}",
-        "Partner": f"{YCLIENTS_COMPANY_ID or ''}",
-        "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN or ''}",
-    }
+    "Accept": "application/vnd.api.v2+json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+    "Partner": f"{YCLIENTS_COMPANY_ID}",
+    "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
+}
     for url in candidates:
         status, content = await fetch_json("GET", url, headers=headers, timeout=15)
         print("YCLIENTS TRY:", url, "STATUS:", status, flush=True)
