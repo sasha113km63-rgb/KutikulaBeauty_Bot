@@ -292,39 +292,49 @@ YCLIENTS_COMPANY_ID = os.environ.get("YCLIENTS_COMPANY_ID")
 YCLIENTS_USER_TOKEN = os.environ.get("YCLIENTS_USER_TOKEN")
 YCLIENTS_PARTNER_TOKEN = os.environ.get("YCLIENTS_PARTNER_TOKEN")
 
-async def get_services_from_yclients():
-    """Получить список услуг из YCLIENTS API"""
-    url = f"{YCLIENTS_API_BASE}/services/{YCLIENTS_COMPANY_ID}"
+async def get_services_from_yclients() -> List[Dict[str, Any]]:
+    import httpx
+    import os
+
+    YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE")
+    YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
+    YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+    YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
 
     headers = {
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "Partner-Token": YCLIENTS_PARTNER_TOKEN,
         "Accept": "application/vnd.api.v2+json",
         "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN or YCLIENTS_PARTNER_TOKEN}",
+        "Partner": YCLIENTS_COMPANY_ID  # 🔹 обязательное поле — идентификатор партнёра
     }
 
+    url = f"{YCLIENTS_API_BASE}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services"
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers)
-
-        # 🔍 отладка в логах Render
-        print("YCLIENTS RESPONSE:", response.status_code, response.text[:500], flush=True)
-
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, dict) and "data" in data:
-                return data["data"]
-            elif isinstance(data, list):
-                return data
+            if response.status_code in (200, 201):
+                data = response.json()
+                items = data.get("data", [])
+                services = []
+                for it in items:
+                    sid = it.get("id")
+                    title = it.get("title") or it.get("name") or it.get("service_name")
+                    price = it.get("price") or it.get("cost") or it.get("price_value")
+                    category = it.get("category") or it.get("section") or None
+                    services.append({
+                        "id": sid,
+                        "title": title,
+                        "price": price,
+                        "category": category,
+                        "raw": it
+                    })
+                return services
             else:
-                print("Неожиданная структура данных:", data, flush=True)
+                print(f"Ошибка {response.status_code}: {response.text}", flush=True)
                 return []
-        else:
-            print(f"Ошибка при обращении к YCLIENTS API: {response.status_code} — {response.text}", flush=True)
-            return []
-
     except Exception as e:
-        print("Ошибка при загрузке услуг:", e, flush=True)
+        print("Исключение при get_services_from_yclients:", str(e), flush=True)
         return []
 async def handle_user_message(chat_id: int, text: str, background_tasks: BackgroundTasks):
     text = (text or "").strip()
