@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-main.py — основной файл для Telegram-бота KUTIKULA (без встроенных токенов).
-Требует настройки переменных окружения на Render (или в другой среде):
-- TELEGRAM_TOKEN
-- OPENAI_API_KEY
-- YCLIENTS_USER_TOKEN
-- YCLIENTS_PARTNER_TOKEN
-- YCLIENTS_COMPANY_ID
-- YCLIENTS_API_BASE (рекомендуется https://api.yclients.com)
-- ADMIN_CHAT_ID
-- BASE_URL (адрес сервиса, например https://kutikulabeauty-bot.onrender.com)
-"""
 
 import os
 import json
