@@ -245,7 +245,6 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
-                "Partner": f"{YCLIENTS_COMPANY_ID}"
             }
         })
         header_variants.append({
