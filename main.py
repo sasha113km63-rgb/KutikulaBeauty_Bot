@@ -185,28 +185,50 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
                 return r.status_code, {"_text": r.text}
         except Exception:
             return None, {"error": "http_exception"}
-async def get_services_from_yclients() -> List[Dict[str,Any]]:
-    headers = {"Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"} if YCLIENTS_USER_TOKEN else ({"Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"} if YCLIENTS_PARTNER_TOKEN else {})
-    candidates = [
-        f"{YCLIENTS_API_BASE}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE}/api/v1/services?company_id={YCLIENTS_COMPANY_ID}",
-    ]
-    for url in candidates:
-        status, content = await fetch_json("GET", url, headers=headers)
-        if status in (200,201) and content:
-            items = content.get("data") if isinstance(content, dict) and content.get("data") else (content if isinstance(content, list) else [])
-            services = []
-            for it in items:
-                sid = it.get("id") or it.get("service_id")
-                title = it.get("title") or it.get("name") or it.get("service_name")
-                price = it.get("price") or it.get("cost") or it.get("price_value")
-                category = it.get("category") or it.get("section") or None
-                if sid and title:
-                    services.append({"id": sid, "title": title, "price": price, "category": category, "raw": it})
-            if services:
+async def get_services_from_yclients() -> List[Dict[str, Any]]:
+    import httpx
+    import os
+
+    YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE")
+    YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
+    YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+    YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
+
+    headers = {
+        "Accept": "application/vnd.api.v2+json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN or YCLIENTS_PARTNER_TOKEN}",
+        "Partner": YCLIENTS_COMPANY_ID  # 🔹 обязательное поле — идентификатор партнёра
+    }
+
+    url = f"{YCLIENTS_API_BASE}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code in (200, 201):
+                data = response.json()
+                items = data.get("data", [])
+                services = []
+                for it in items:
+                    sid = it.get("id")
+                    title = it.get("title") or it.get("name") or it.get("service_name")
+                    price = it.get("price") or it.get("cost") or it.get("price_value")
+                    category = it.get("category") or it.get("section") or None
+                    services.append({
+                        "id": sid,
+                        "title": title,
+                        "price": price,
+                        "category": category,
+                        "raw": it
+                    })
                 return services
-    return []
+            else:
+                print(f"Ошибка {response.status_code}: {response.text}", flush=True)
+                return []
+    except Exception as e:
+        print("Исключение при get_services_from_yclients:", str(e), flush=True)
+        return []
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
     headers = {"Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"} if YCLIENTS_USER_TOKEN else ({"Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"} if YCLIENTS_PARTNER_TOKEN else {})
     url = f"{YCLIENTS_API_BASE}/api/v1/companies/{YCLIENTS_COMPANY_ID}/book_times"
