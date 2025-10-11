@@ -220,10 +220,10 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
 
     # Популярные candidate endpoint'ы (используются разными аккаунтами YCLIENTS)
     candidates = [
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/services?company_id={YCLIENTS_COMPANY_ID}",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/services?company_id={YCLIENTS_COMPANY_ID}",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v2/company/{YCLIENTS_COMPANY_ID}/services",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v2/companies/{YCLIENTS_COMPANY_ID}/services",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v2/services?company_id={YCLIENTS_COMPANY_ID}",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v2/companies/services?company_id={YCLIENTS_COMPANY_ID}",
     ]
 
     # Соберём варианты заголовков, которые будем пробовать (очень важно логировать)
