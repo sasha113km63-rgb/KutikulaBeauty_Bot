@@ -212,42 +212,127 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
             return None, {"error": str(e)}
 
 async def get_services_from_yclients() -> List[Dict[str, Any]]:
+    """
+    Попытки нескольких общих вариантов запросов к YCLIENTS API.
+    Печатает в лог каждый пробный запрос и ответ — это нужно для диагностики.
+    """
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
 
-    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
+    # Популярные candidate endpoint'ы (используются разными аккаунтами YCLIENTS)
+    candidates = [
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/services?company_id={YCLIENTS_COMPANY_ID}",
+        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/services?company_id={YCLIENTS_COMPANY_ID}",
+    ]
 
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "Partner-Id": "11673",  # твой Partner ID — укажи без кавычек если хочешь
-        "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
-    }
+    # Соберём варианты заголовков, которые будем пробовать (очень важно логировать)
+    header_variants = []
 
-    print("Запрос к YCLIENTS:", url, flush=True)
+    # Вариант 1: использовать USER token (если есть) — обычно хватает
+    if YCLIENTS_USER_TOKEN:
+        header_variants.append({
+            "name": "user_bearer",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"
+            }
+        })
 
-    status, content = await fetch_json("GET", url, headers=headers, timeout=15)
-    print("Ответ YCLIENTS:", status, content, flush=True)
+    # Вариант 2: partner token + partner id (несколько названий заголовка — пробуем)
+    if YCLIENTS_PARTNER_TOKEN and YCLIENTS_COMPANY_ID:
+        header_variants.append({
+            "name": "partner_token_x",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
+                "Partner": f"{YCLIENTS_COMPANY_ID}"
+            }
+        })
+        header_variants.append({
+            "name": "partner_token_partner-id",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
+                "Partner-Id": f"{YCLIENTS_COMPANY_ID}"
+            }
+        })
+        header_variants.append({
+            "name": "partner_token_partnerid_no_x",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Partner-Id": f"{YCLIENTS_COMPANY_ID}",
+                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
+            }
+        })
+        header_variants.append({
+            "name": "partner_token_partnerid_plain",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "PartnerId": f"{YCLIENTS_COMPANY_ID}",
+                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
+            }
+        })
 
-    if status in (200, 201) and isinstance(content, dict):
-        items = content.get("data", [])
-        services = []
-        for it in items:
-            sid = it.get("id") or it.get("service_id")
-            title = it.get("title") or it.get("name") or it.get("service_name")
-            price = it.get("price") or it.get("cost") or it.get("price_value")
-            category = it.get("category") or it.get("section") or None
-            services.append({
-                "id": sid,
-                "title": title,
-                "price": price,
-                "category": category,
-                "raw": it
-            })
-        return services
+    # Вариант 3: partner token только (без partner id) — иногда API требует только X-Partner-Token
+    if YCLIENTS_PARTNER_TOKEN:
+        header_variants.append({
+            "name": "x_partner_token_only",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
+            }
+        })
 
-    print("Ошибка при обращении к YCLIENTS API:", content, flush=True)
+    # Если нет ни одного варианта — выходим
+    if not header_variants:
+        print("YCLIENTS: Нет доступных токенов (USER или PARTNER).", flush=True)
+        return []
+
+    # Пробуем каждый candidate endpoint и каждую комбинацию заголовков
+    for url in candidates:
+        for hv in header_variants:
+            try:
+                print(f"YCLIENTS TRY ({hv['name']}): {url} HEADERS: {hv['headers']}", flush=True)
+                status, content = await fetch_json("GET", url, headers=hv["headers"], timeout=15)
+                print(f"YCLIENTS RESPONSE ({hv['name']}) STATUS: {status} CONTENT: {content}", flush=True)
+            except Exception as e:
+                print("YCLIENTS EXCEPTION:", str(e), flush=True)
+                status, content = None, {"error": str(e)}
+
+            # Успешный ответ — пытаемся распарсить услуги
+            if status in (200, 201) and isinstance(content, dict):
+                items = content.get("data") if isinstance(content.get("data"), list) else content.get("services") or content.get("result") or []
+                services = []
+                for it in items or []:
+                    sid = it.get("id") or it.get("service_id")
+                    title = it.get("title") or it.get("name") or it.get("service_name")
+                    price = it.get("price") or it.get("cost") or it.get("price_value")
+                    category = it.get("category") or it.get("section") or None
+                    services.append({
+                        "id": sid,
+                        "title": title,
+                        "price": price,
+                        "category": category,
+                        "raw": it
+                    })
+                print(f"YCLIENTS: Нашли {len(services)} услуг (вариант {hv['name']})", flush=True)
+                return services
+
+            # Логируем ошибку сервера YCLIENTS (полезно для диагностики)
+            if isinstance(content, dict) and content.get("meta") is not None:
+                print("YCLIENTS meta:", content.get("meta"), flush=True)
+
+    # Ни один вариант не сработал
+    print("YCLIENTS: все варианты запросов к services вернули ошибку.", flush=True)
     return []
+                
 
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
