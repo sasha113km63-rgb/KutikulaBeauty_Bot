@@ -220,7 +220,7 @@ async def get_services_from_yclients():
         "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"
     }
 
-    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
+    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/services/{YCLIENTS_COMPANY_ID}"
 
     try:
         async with httpx.AsyncClient() as client:
