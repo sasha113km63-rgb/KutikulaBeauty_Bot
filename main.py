@@ -214,44 +214,39 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
 async def get_services_from_yclients() -> List[Dict[str, Any]]:
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
 
-    candidates = [
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/services/company_id={YCLIENTS_COMPANY_ID}",
-        f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/services?company_id={YCLIENTS_COMPANY_ID}",
-    ]
+    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
     headers = {
-        "Accept": "application/vnd.api.v2+json",
+        "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "Partner": "11673",  # <-- твой partner ID из YCLIENTS
+        "Partner": "11673",  # твой Partner ID
         "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
     }
 
-    for url in candidates:
-        status, content = await fetch_json("GET", url, headers=headers, timeout=15)
-        print("YCLIENTS TRY:", url, "STATUS:", status, flush=True)
+    print("Запрос к YCLIENTS:", url, flush=True)
 
-        if status in (200, 201) and content:
-            items = content.get("data") if isinstance(content, dict) else []
-            services = []
-            for it in items:
-                sid = it.get("id") or it.get("service_id")
-                title = it.get("title") or it.get("name") or it.get("service_name")
-                price = it.get("price") or it.get("cost") or it.get("price_value")
-                category = it.get("category") or it.get("section") or None
-                services.append({
-                    "id": sid,
-                    "title": title,
-                    "price": price,
-                    "category": category,
-                    "raw": it
-                })
-            if services:
-                return services
+    status, content = await fetch_json("GET", url, headers=headers, timeout=15)
+    print("Ответ YCLIENTS:", status, content, flush=True)
 
-    print("YCLIENTS error content:", content, flush=True)
+    if status in (200, 201) and isinstance(content, dict):
+        items = content.get("data", [])
+        services = []
+        for it in items:
+            sid = it.get("id") or it.get("service_id")
+            title = it.get("title") or it.get("name") or it.get("service_name")
+            price = it.get("price") or it.get("cost") or it.get("price_value")
+            category = it.get("category") or it.get("section") or None
+            services.append({
+                "id": sid,
+                "title": title,
+                "price": price,
+                "category": category,
+                "raw": it
+            })
+        return services
+
+    print("Ошибка при обращении к YCLIENTS API:", content, flush=True)
     return []
 
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
