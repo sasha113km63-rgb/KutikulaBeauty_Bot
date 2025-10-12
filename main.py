@@ -214,12 +214,14 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
 # === Получение списка услуг из YCLIENTS (через USER TOKEN) ===
 async def get_services_from_yclients():
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE or "https://api.yclients.com"
+    
    headers = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
     "Partner": f"{YCLIENTS_COMPANY_ID}"
 }
+
 url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
     try:
