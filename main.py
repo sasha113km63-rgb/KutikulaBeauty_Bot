@@ -219,8 +219,7 @@ async def get_services_from_yclients():
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-    "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
-    "Partner": f"{YCLIENTS_COMPANY_ID}"
+    "Partner": f"{YCLIENTS_PARTNER_TOKEN}"
 }
 
     url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
