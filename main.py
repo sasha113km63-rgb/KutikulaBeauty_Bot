@@ -211,18 +211,18 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
         except Exception as e:
             return None, {"error": str(e)}
 
-# === Получение списка услуг из YCLIENTS (через USER TOKEN) ===
+# --- Получение списка услуг из YCLIENTS (через USER TOKEN или PARTNER TOKEN) ---
 async def get_services_from_yclients():
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE or "https://api.yclients.com"
-    
-   headers = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
-    "Partner": f"{YCLIENTS_COMPANY_ID}"
-}
 
-url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}",
+        "Partner": f"{YCLIENTS_COMPANY_ID}"
+    }
+
+    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -233,13 +233,11 @@ url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
                 data = response.json()
                 if isinstance(data, dict) and "data" in data:
                     return data["data"]
-                return data
-            else:
-                print("Ошибка YCLIENTS:", response.status_code, response.text)
-                return None
+
     except Exception as e:
-        print("Исключение при запросе YCLIENTS:", str(e))
-        return None
+        print(f"Ошибка при обращении к YCLIENTS API: {e}", flush=True)
+        return []
+        
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
     url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/companies/{YCLIENTS_COMPANY_ID}/book_times"
