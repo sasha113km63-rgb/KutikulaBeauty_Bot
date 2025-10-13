@@ -211,36 +211,48 @@ async def fetch_json(method: str, url: str, headers: dict = None, params: dict =
         except Exception as e:
             return None, {"error": str(e)}
 
-# --- Получение списка услуг из YCLIENTS (через PARTNER TOKEN) ---
-async def get_services_from_yclients():
+# --- Получение списка услуг из YCLIENTS (личная интеграция, через USER TOKEN) ---
+import httpx
+
+async def get_services_from_yclients() -> List[Dict[str, Any]]:
+    """
+    Получает список услуг из YCLIENTS по личной интеграции (без Partner Token).
+    Используется User Token и Company ID.
+    """
+
+    # Базовый URL API YCLIENTS
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE or "https://api.yclients.com"
 
+    # Формируем заголовки авторизации
     headers = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-    "Partner": f"{YCLIENTS_PARTNER_TOKEN}"
-}
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"  # личный токен из API
+    }
 
+    # Адрес запроса к API (по твоему филиалу)
     url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers, timeout=20.0)
-            print(f"YCLIENTS TRY (partner_token): {url} STATUS: {response.status_code}", flush=True)
+            print(f"YCLIENTS TRY (user_token): {url} STATUS: {response.status_code}", flush=True)
 
-            data = response.json()
-            print("YCLIENTS RESPONSE:", data, flush=True)
-
-            if response.status_code == 200 and isinstance(data, dict) and "data" in data:
-                return data["data"]
+            # Проверяем успешность
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "data" in data:
+                    return data["data"]
+                else:
+                    print(f"YCLIENTS RESPONSE WARNING: unexpected format {data}", flush=True)
             else:
-                print("Ошибка YCLIENTS:", data, flush=True)
-                return []
+                print(f"Ошибка YCLIENTS: {response.status_code} {response.text}", flush=True)
 
     except Exception as e:
-        print(f"Ошибка при обращении к YCLIENTS API: {e}", flush=True)
-        return []
+        print(f"Ошибка при запросе к YCLIENTS API: {e}", flush=True)
+
+    return []
+
         
 async def query_yclients_slots(service_id: int, staff_id: Optional[int] = None, limit:int=3) -> List[Dict[str,Any]]:
     YCLIENTS_API_BASE_LOCAL = YCLIENTS_API_BASE.rstrip("/")
