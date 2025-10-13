@@ -279,26 +279,28 @@ async def startup_event():
 
 # Telegram webhook endpoint
 @app.post("/telegram-webhook")
-async def telegram_webhook(request: Request, background: BackgroundTasks):
-    body = await request.json()
-    # debug log
-    logger.info("Telegram update: %s", json.dumps(body)[:1000])
-    # handle message updates
-    update = body
-    if "message" in update:
-        msg = update["message"]
-        chat_id = str(msg["chat"]["id"])
-        text = msg.get("text", "")
-        # append to dialog log
-        append_dialog(chat_id, {"from": "user", "text": text, "ts": time.time()})
-        # process message
-        background.add_task(process_user_message, chat_id, text)
-        return JSONResponse({"ok": True})
-    elif "callback_query" in update:
-        # not implemented here
-        return JSONResponse({"ok": True})
-    else:
-        return JSONResponse({"ok": True})
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        print("📩 Incoming Telegram update:", json.dumps(data, ensure_ascii=False, indent=2))
+
+        # Проверим, есть ли сообщение
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            text = data["message"].get("text", "")
+
+            # Простейший ответ пользователю
+            await send_message(chat_id, f"Вы написали: {text}")
+
+            # Отправка уведомления администратору (если включено)
+            if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                await send_message(ADMIN_CHAT_ID, f"📨 Новое сообщение от пользователя {chat_id}: {text}")
+
+        return {"ok": True}
+
+    except Exception as e:
+        print("❌ Ошибка в webhook:", e)
+        return {"ok": False, "error": str(e)}
 
 async def process_user_message(chat_id: str, text: str):
     """
