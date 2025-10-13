@@ -147,70 +147,79 @@ async def call_openai_parse(user_text: str) -> Dict[str, Any]:
         logger.exception("OpenAI call failed")
         return {"intent": None, "requested_service": None, "date": None, "time": None, "raw": user_text}
 
-# --- YCLIENTS helpers ----------------
+# --- Получение списка услуг из YCLIENTS ---
 async def try_yclients_get_services() -> (int, Any):
     """
-    Получаем список услуг из YCLIENTS через системного пользователя и партнёрский токен.
+    Пробует получить список услуг из YCLIENTS через разные варианты токенов и эндпоинтов.
+    Возвращает (status_code, data).
     """
     base = YCLIENTS_API_BASE.rstrip("/")
-    url = f"{base}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
+    endpoints = [
+        f"{base}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
+        f"{base}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
+        f"{base}/api/v1/services?company_id={YCLIENTS_COMPANY_ID}",
+        f"{base}/api/v1/companies/services?company_id={YCLIENTS_COMPANY_ID}",
+    ]
 
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-    }
+    header_variants = []
 
-    # если есть партнёрский токен — добавляем его в заголовки
+    # --- Вариант A: Bearer-токен системного пользователя ---
+    if YCLIENTS_USER_TOKEN:
+        header_variants.append({
+            "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
+
+    # --- Вариант B: Партнёрский токен + ID партнёра ---
     if YCLIENTS_PARTNER_TOKEN:
-    header_variants.append({
-        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
-        "Partner-Id": YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
+        header_variants.append({
+            "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+            "Partner-Id": YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
+        header_variants.append({
+            "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+            "Partner": YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
 
-    if os.getenv("YCLIENTS_PARTNER_ID"):
-        headers["Partner-Id"] = os.getenv("YCLIENTS_PARTNER_ID")
+    # --- Вариант C: Оба токена вместе (иногда требует API YCLIENTS) ---
+    if YCLIENTS_USER_TOKEN and YCLIENTS_PARTNER_TOKEN:
+        header_variants.append({
+            "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+            "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+            "Partner-Id": YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            logger.info(f"Запрос списка услуг: {url}")
-            r = await client.get(url, headers=headers)
-            logger.info(f"Ответ YCLIENTS {r.status_code}: {r.text[:300]}")
-
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict) and "data" in data:
-                    return 200, data["data"]
-                return 200, data
-            else:
-                return r.status_code, r.text
-
-    except Exception as e:
-        logger.exception("Ошибка при получении услуг из YCLIENTS")
-        return 500, {"error": str(e)}
-        
+    # --- Попытки вызова API ---
     async with httpx.AsyncClient(timeout=20.0) as client:
         for url in endpoints:
             for headers in header_variants:
                 try:
-                    logger.info("YCLIENTS TRY (%s) HEADERS: %s", url, {k: (v[:6] + "...") if "Token" in k or "Authorization" in k else v for k,v in headers.items()})
+                    logger.info(f"🔹 YCLIENTS TRY: {url}")
+                    safe_headers = {k: (v[:6] + "...") if "Token" in k or "Authorization" in k else v for k, v in headers.items()}
+                    logger.info(f"🔹 HEADERS: {safe_headers}")
+
                     r = await client.get(url, headers=headers)
-                    status = r.status_code
-                    # log content for debugging
-                    logger.info("YCLIENTS RESPONSE (%s) STATUS: %s CONTENT: %s", headers.get("Authorization") or headers.get("X-Partner-Token","-"), status, r.text[:300])
-                    if status == 200:
+                    logger.info(f"🔹 RESPONSE STATUS: {r.status_code}")
+                    logger.info(f"🔹 RESPONSE BODY: {r.text[:300]}")
+
+                    if r.status_code == 200:
                         try:
-                            return status, r.json()
+                            return r.status_code, r.json()
                         except Exception:
-                            return status, r.text
-                    # continue trying other combos
+                            return r.status_code, r.text
+
                 except Exception as e:
-                    logger.exception("Error while trying services endpoint")
+                    logger.exception("❌ Ошибка при запросе к YCLIENTS:", exc_info=e)
                     continue
-    # если ничего не сработало:
-    return 500, {"error": "all endpoints tried and failed"}
+
+    return 500, {"error": "Не удалось получить список услуг — все варианты запросов завершились неудачно."}
 
 async def try_yclients_create_booking(payload: Dict[str, Any]) -> (int, Any):
     """
