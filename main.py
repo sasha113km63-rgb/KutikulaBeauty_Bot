@@ -107,30 +107,44 @@ async def send_message(chat_id: int, text: str):
         if response.status_code != 200:
             print(f"Ошибка при отправке сообщения Telegram: {response.text}")
 
+from openai import OpenAI
+import os, json
+from typing import Dict, Any
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 async def call_openai_parse(user_text: str) -> Dict[str, Any]:
     """
-    Простая обёртка для разбора запроса через OpenAI.
+    Простая обёртка для разбора запроса через OpenAI (новый API >=1.0).
     Возвращает dict с полями: intent, requested_service, date, time, raw
-    (это облегчённая обработка — можно расширить)
     """
-    if not OPENAI_API_KEY:
-        return {"intent": None, "requested_service": None, "date": None, "time": None, "raw": user_text}
+    if not os.getenv("OPENAI_API_KEY"):
+        return {
+            "intent": None,
+            "requested_service": None,
+            "date": None,
+            "time": None,
+            "raw": user_text
+        }
 
     prompt = (
         f"Пользователь написал: \"{user_text}\"\n"
         "Определи намерение (intent): запись или просто вопрос. Если запись — попробуй "
         "выделить название услуги (service), желаемую дату (date) и время (time). "
-        "Если не уверенно — оставь null для поля.\n\n"
+        "Если не уверен — оставь null для поля.\n\n"
         "Верни JSON с полями: intent, service, date, time."
     )
+
     try:
-        resp = openai.ChatCompletion.create(
+        # 🔹 Новый способ вызова OpenAI API
+        completion = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
         )
-        txt = resp["choices"][0]["message"]["content"].strip()
-        # ожидаем JSON — попробуем распарсить
+
+        txt = completion.choices[0].message.content.strip()
+
         try:
             parsed = json.loads(txt)
             return {
@@ -141,36 +155,65 @@ async def call_openai_parse(user_text: str) -> Dict[str, Any]:
                 "raw": user_text,
             }
         except Exception:
-            # если OpenAI ответил в свободной форме — вернём минимально полезную структуру
-            return {"intent": None, "requested_service": None, "date": None, "time": None, "raw": user_text}
+            return {
+                "intent": None,
+                "requested_service": None,
+                "date": None,
+                "time": None,
+                "raw": user_text,
+            }
+
     except Exception as e:
         logger.exception("OpenAI call failed")
-        return {"intent": None, "requested_service": None, "date": None, "time": None, "raw": user_text}
+        return {
+            "intent": None,
+            "requested_service": None,
+            "date": None,
+            "time": None,
+            "raw": user_text,
+        }
 
 # --- Получение списка услуг из YCLIENTS ---
-async def try_yclients_get_services() -> (int, Any):
+async def try_yclients_get_services():
     """
-    Получает список услуг через YCLIENTS API, включая partner в URL и корректный заголовок Partner.
+    Получение списка услуг из YCLIENTS.
+    Использует корректный формат запроса с partner и токенами.
     """
-    base = YCLIENTS_API_BASE.rstrip("/")
-    partner_id = YCLIENTS_PARTNER_ID or "11673"  # твой partner ID по приложению
-    company_id = YCLIENTS_COMPANY_ID
+    import httpx
+    import logging
+    logger = logging.getLogger("kutikula_bot")
 
-    endpoints = [
-        f"{base}/api/v1/company/{company_id}/services?partner={partner_id}",
-        f"{base}/api/v1/book_services/{company_id}?partner={partner_id}",  # ✅ резервный эндпоинт для партнёрских интеграций
-        f"{base}/api/v1/companies/{company_id}/services?partner={partner_id}",
-    ]
+    base_url = YCLIENTS_API_BASE or "https://api.yclients.com"
+    url = f"{base_url}/api/v1/company/{YCLIENTS_COMPANY_ID}/services?partner={YCLIENTS_PARTNER_ID}"
 
-    header_variants = [
-        {
-            "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-            "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
-            "Partner": partner_id,  # 👈 заменили Partner-Id → Partner
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-    ]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=20.0)
+            logger.info(f"🔹 YCLIENTS TRY: {url}")
+            logger.info(f"🔹 HEADERS: {headers}")
+            logger.info(f"🔹 RESPONSE STATUS: {response.status_code}")
+            logger.info(f"🔹 RESPONSE BODY: {response.text}")
+
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "data" in data:
+                    return data["data"]
+                else:
+                    logger.warning(f"⚠️ Некорректный ответ YCLIENTS: {data}")
+                    return []
+            else:
+                logger.error(f"❌ Ошибка YCLIENTS: {response.text}")
+                return []
+    except Exception as e:
+        logger.exception(f"❌ Исключение при запросе YCLIENTS: {e}")
+        return []
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         for url in endpoints:
