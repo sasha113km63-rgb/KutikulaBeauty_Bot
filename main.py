@@ -15,6 +15,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
 YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+YCLIENTS_PARTNER_ID = os.getenv("YCLIENTS_PARTNER_ID")
 YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
 YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
@@ -232,7 +233,7 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
 }
 
     # Адрес запроса к API (по твоему филиалу)
-    url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
+    url = f"{YCLIENTS_API_BASE}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
 
     try:
         async with httpx.AsyncClient() as client:
