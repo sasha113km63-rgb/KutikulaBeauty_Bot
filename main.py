@@ -89,3 +89,34 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+# ---------- TELEGRAM HANDLERS ----------
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+# Обработчик команды /start
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "Здравствуйте! 👋\nЯ помогу вам просмотреть и отменить запись в YCLIENTS.")
+
+# Обработчик текстовых сообщений
+@bot.message_handler(func=lambda message: True)
+def echo_message(message):
+    bot.reply_to(message, "Напишите /start, чтобы начать.")
+
+# ---------- FASTAPI WEBHOOK ----------
+
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    """Получаем обновления от Telegram"""
+    data = await request.json()
+    update = telebot.types.Update.de_json(data)
+    bot.process_new_updates([update])
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
+# ---------- MAIN ----------
+if name == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
