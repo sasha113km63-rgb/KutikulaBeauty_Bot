@@ -177,44 +177,58 @@ async def call_openai_parse(user_text: str) -> Dict[str, Any]:
 async def try_yclients_get_services():
     """
     Получение списка услуг из YCLIENTS.
-    Исправленный вариант с корректными заголовками (Partner-Id).
+    Проверяет оба варианта — с partner_token и без.
     """
     import httpx
     import logging
     logger = logging.getLogger("kutikula_bot")
 
     base_url = YCLIENTS_API_BASE or "https://api.yclients.com"
-    url = f"{base_url}/api/v1/company/{YCLIENTS_COMPANY_ID}/services?partner={YCLIENTS_PARTNER_ID}"
+    url_partner = f"{base_url}/api/v1/book_services/{YCLIENTS_COMPANY_ID}?partner={YCLIENTS_PARTNER_ID}"
+    url_direct = f"{base_url}/api/v1/book_services/{YCLIENTS_COMPANY_ID}"
 
-    headers = {
+    headers_common = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
-        "Partner-Id": str(YCLIENTS_PARTNER_ID)  # 👈 Добавлено обязательно!
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=20.0)
+    headers_partner = {
+        **headers_common,
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+        "Partner-Id": str(YCLIENTS_PARTNER_ID),
+    }
+
+    headers_user = {
+        **headers_common,
+        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+    }
+
+    async with httpx.AsyncClient() as client:
+        for url, headers in [
+            (url_partner, headers_partner),
+            (url_direct, headers_user)
+        ]:
             logger.info(f"🔹 YCLIENTS TRY: {url}")
             logger.info(f"🔹 HEADERS: {headers}")
-            logger.info(f"🔹 RESPONSE STATUS: {response.status_code}")
-            logger.info(f"🔹 RESPONSE BODY: {response.text}")
+            try:
+                response = await client.get(url, headers=headers, timeout=20.0)
+                logger.info(f"🔹 RESPONSE STATUS: {response.status_code}")
+                logger.info(f"🔹 RESPONSE BODY: {response.text}")
 
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict) and "data" in data:
-                    return data["data"]
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, dict) and "data" in data:
+                        return data["data"]
+                    else:
+                        logger.warning(f"⚠️ Некорректный ответ YCLIENTS: {data}")
                 else:
-                    logger.warning(f"⚠️ Некорректный ответ YCLIENTS: {data}")
-                    return []
-            else:
-                logger.error(f"❌ Ошибка YCLIENTS: {response.text}")
-                return []
-    except Exception as e:
-        logger.exception(f"❌ Исключение при запросе YCLIENTS: {e}")
-        return []
+                    logger.error(f"❌ Ошибка YCLIENTS: {response.text}")
+            except Exception as e:
+                logger.exception(f"❌ Исключение при запросе YCLIENTS ({url}): {e}")
+
+    # Если оба варианта не сработали:
+    return {"error": "Не удалось получить список услуг — все варианты запросов завершились неудачно."}
     
 async def try_yclients_create_booking(payload: Dict[str, Any]) -> (int, Any):
     """
