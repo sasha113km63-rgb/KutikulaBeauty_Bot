@@ -225,10 +225,11 @@ async def get_services_from_yclients() -> List[Dict[str, Any]]:
 
     # Формируем заголовки авторизации
     headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}"  # личный токен из API
-    }
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
+    "Partner-Token": f"{YCLIENTS_PARTNER_TOKEN}"
+}
 
     # Адрес запроса к API (по твоему филиалу)
     url = f"{YCLIENTS_API_BASE_LOCAL}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
