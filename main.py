@@ -1,94 +1,194 @@
 import os
 import logging
+import httpx
 import telebot
 from telebot import types
-from yclients_api import authorize_user, get_records, delete_record
+from dotenv import load_dotenv
 
-# Настройки логирования
+# ──────────────────────────────────────────────
+# 🔧 Настройки и переменные окружения
+# ──────────────────────────────────────────────
+load_dotenv()
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
+YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN")
+YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD")
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("kutikula_bot")
 
-# Загружаем токен бота
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+API_URL = "https://api.yclients.com/api/v1"
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+# ──────────────────────────────────────────────
+# 🧩 Авторизация в YCLIENTS (через логин/пароль)
+# ──────────────────────────────────────────────
+async def yclients_get_user_token():
+    url = f"{API_URL}/auth"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.yclients.v2+json",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"
+    }
+    payload = {
+        "login": YCLIENTS_LOGIN,
+        "password": YCLIENTS_PASSWORD
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        data = response.json()
+        if data.get("success") and data.get("data", {}).get("user_token"):
+            return data["data"]["user_token"]
+        logger.error(f"❌ Ошибка авторизации YCLIENTS: {data}")
+        return None
 
 
-# --------------------- Команды ---------------------
+# ──────────────────────────────────────────────
+# 📋 Получить список услуг
+# ──────────────────────────────────────────────
+async def yclients_get_services(user_token: str):
+    url = f"{API_URL}/company/{YCLIENTS_COMPANY_ID}/services"
+    headers = {
+        "Accept": "application/vnd.yclients.v2+json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}"
+    }
 
-@bot.message_handler(commands=['start'])
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(url, headers=headers)
+        data = response.json()
+        if data.get("success"):
+            return data["data"]
+        logger.error(f"❌ Ошибка получения услуг: {data}")
+        return None
+
+
+# ──────────────────────────────────────────────
+# 📅 Получить записи клиента
+# ──────────────────────────────────────────────
+async def yclients_get_records(user_token: str):
+    url = f"{API_URL}/records/{YCLIENTS_COMPANY_ID}"
+    headers = {
+        "Accept": "application/vnd.yclients.v2+json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}"
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(url, headers=headers)
+        data = response.json()
+        if data.get("success"):
+            return data["data"]
+        logger.error(f"❌ Ошибка получения записей: {data}")
+        return None
+
+
+# ──────────────────────────────────────────────
+# ❌ Отмена записи
+# ──────────────────────────────────────────────
+async def yclients_cancel_record(user_token: str, record_id: int):
+    url = f"{API_URL}/record/{YCLIENTS_COMPANY_ID}/{record_id}/delete"
+    headers = {
+        "Accept": "application/vnd.yclients.v2+json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}"
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(url, headers=headers)
+        data = response.json()
+        if data.get("success"):
+            return True
+        logger.error(f"❌ Ошибка отмены записи: {data}")
+        return False
+
+# ──────────────────────────────────────────────
+# 🤖 Telegram-бот
+# ──────────────────────────────────────────────
+@bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(
-        message,
-        "👋 Привет! Я бот для управления записями YCLIENTS.\n\n"
-        "Доступные команды:\n"
-        "/myrecords — посмотреть твои записи\n"
-        "/cancel — отменить запись"
-    )
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("📋 Услуги", "🗓 Мои записи", "❌ Отменить запись")
+    bot.send_message(message.chat.id, "Привет! Я бот для записи и управления визитами 💅", reply_markup=markup)
 
 
-@bot.message_handler(commands=['myrecords'])
-def my_records(message):
-    """Показать все записи пользователя"""
-    bot.send_message(message.chat.id, "🔄 Получаю твои записи, подожди...")
+@bot.message_handler(func=lambda m: m.text == "📋 Услуги")
+def handle_services(message):
+    import asyncio
+    asyncio.run(send_services_list(message))
 
-    records_data = get_records()
 
-    if not records_data or not records_data.get("data"):
-        bot.send_message(message.chat.id, "😕 У тебя пока нет активных записей.")
+async def send_services_list(message):
+    token = await yclients_get_user_token()
+    if not token:
+        bot.send_message(message.chat.id, "Не удалось авторизоваться 😔")
         return
 
-    for record in records_data["data"]:
-        service_name = record["services"][0]["title"] if record.get("services") else "Без названия"
-        staff_name = record["staff"]["name"] if record.get("staff") else "Без мастера"
-        datetime = record["datetime"]
-        record_id = record["id"]
-        record_hash = record["record_hash"]
+    services = await yclients_get_services(token)
+    if not services:
+        bot.send_message(message.chat.id, "Не удалось загрузить список услуг.")
+        return
 
-        text = (
-            f"💅 <b>{service_name}</b>\n"
-            f"👩‍🎨 Мастер: {staff_name}\n"
-            f"📅 Дата: {datetime}\n"
-        )
-
-        # Кнопка отмены
-        keyboard = types.InlineKeyboardMarkup()
-        cancel_btn = types.InlineKeyboardButton(
-            text="❌ Отменить запись",
-            callback_data=f"cancel_{record_id}_{record_hash}"
-        )
-        keyboard.add(cancel_btn)
-
-        bot.send_message(
-            message.chat.id,
-            text,
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
+    text = "📋 *Список услуг:*\n\n"
+    for s in services:
+        text += f"• {s['title']} — {s.get('price_min', '—')}₽\n"
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_"))
-def cancel_record(call):
-    """Удаление записи"""
-    _, record_id, record_hash = call.data.split("_")
+@bot.message_handler(func=lambda m: m.text == "🗓 Мои записи")
+def handle_records(message):
+    import asyncio
+    asyncio.run(send_user_records(message))
 
-    bot.answer_callback_query(call.id, "Удаляю запись...")
-    response = delete_record(record_id, record_hash)
 
-    if response.get("success") or response.get("meta"):
-        bot.edit_message_text(
-            "✅ Запись успешно удалена.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id
-        )
+async def send_user_records(message):
+    token = await yclients_get_user_token()
+    if not token:
+        bot.send_message(message.chat.id, "Не удалось авторизоваться 😔")
+        return
+
+    records = await yclients_get_records(token)
+    if not records:
+        bot.send_message(message.chat.id, "У вас нет активных записей.")
+        return
+
+    text = "🗓 *Ваши записи:*\n\n"
+    for r in records:
+        text += f"• {r['services'][0]['title']} — {r['date']} ({r['staff']['name']})\n"
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "❌ Отменить запись")
+def handle_cancel(message):
+    bot.send_message(message.chat.id, "Введите ID записи, которую хотите отменить.")
+
+
+@bot.message_handler(func=lambda m: m.text.isdigit())
+def cancel_record_by_id(message):
+    import asyncio
+    record_id = int(message.text)
+    asyncio.run(cancel_record_action(message, record_id))
+
+
+async def cancel_record_action(message, record_id):
+    token = await yclients_get_user_token()
+    if not token:
+        bot.send_message(message.chat.id, "Не удалось авторизоваться 😔")
+        return
+
+    success = await yclients_cancel_record(token, record_id)
+    if success:
+        bot.send_message(message.chat.id, f"✅ Запись №{record_id} успешно отменена.")
     else:
-        bot.send_message(
-            call.message.chat.id,
-            f"⚠️ Ошибка при удалении: {response}"
-        )
+        bot.send_message(message.chat.id, "⚠️ Не удалось отменить запись.")
 
-
-# --------------------- Запуск ---------------------
-
+# ──────────────────────────────────────────────
+# 🚀 Запуск
+# ──────────────────────────────────────────────
 if name == "__main__":
-    authorize_user()  # Авторизация при старте
-    bot.polling(none_stop=True)
+    logger.info("Запуск Telegram-бота...")
+    bot.infinity_polling()
