@@ -4,3 +4,4 @@ uvicorn
 gunicorn
 openai
 pyTelegramBotAPI
+python-dotenv
