@@ -16,15 +16,17 @@ from fastapi.responses import JSONResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kutikula_bot")
 
-# --- env vars ----------------
+# ===== Переменные окружения =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
-YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")  # optional
-YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")  # required
-YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
+YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-BASE_URL = os.getenv("BASE_URL")  # e.g. https://your-service.onrender.com
+YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
+BASE_URL = os.getenv("BASE_URL")
 
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
