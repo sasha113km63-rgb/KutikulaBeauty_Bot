@@ -23,6 +23,7 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
 YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+YCLIENTS_PARTNER_ID = os.getenv("YCLIENTS_PARTNER_ID")
 YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
@@ -162,7 +163,12 @@ async def try_yclients_get_services() -> (int, Any):
 
     # если есть партнёрский токен — добавляем его в заголовки
     if YCLIENTS_PARTNER_TOKEN:
-        headers["X-Partner-Token"] = YCLIENTS_PARTNER_TOKEN
+    header_variants.append({
+        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+        "Partner-Id": YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    })
 
     if os.getenv("YCLIENTS_PARTNER_ID"):
         headers["Partner-Id"] = os.getenv("YCLIENTS_PARTNER_ID")
