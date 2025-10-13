@@ -150,46 +150,27 @@ async def call_openai_parse(user_text: str) -> Dict[str, Any]:
 # --- Получение списка услуг из YCLIENTS ---
 async def try_yclients_get_services() -> (int, Any):
     """
-    Пробует получить список услуг из YCLIENTS с указанием partner ID в URL.
+    Получает список услуг через YCLIENTS API, включая partner в URL и корректный заголовок Partner.
     """
     base = YCLIENTS_API_BASE.rstrip("/")
-    partner_id = YCLIENTS_PARTNER_ID or YCLIENTS_COMPANY_ID
+    partner_id = YCLIENTS_PARTNER_ID or "11673"  # твой partner ID по приложению
+    company_id = YCLIENTS_COMPANY_ID
 
-    # ✅ Основные эндпоинты с partner=ID
     endpoints = [
-        f"{base}/api/v1/company/{YCLIENTS_COMPANY_ID}/services?partner={partner_id}",
-        f"{base}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services?partner={partner_id}",
-        f"{base}/api/v1/services/{YCLIENTS_COMPANY_ID}?partner={partner_id}",
+        f"{base}/api/v1/company/{company_id}/services?partner={partner_id}",
+        f"{base}/api/v1/book_services/{company_id}?partner={partner_id}",  # ✅ резервный эндпоинт для партнёрских интеграций
+        f"{base}/api/v1/companies/{company_id}/services?partner={partner_id}",
     ]
 
-    header_variants = []
-
-    # --- Bearer токен пользователя ---
-    if YCLIENTS_USER_TOKEN:
-        header_variants.append({
-            "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-
-    # --- Partner токен ---
-    if YCLIENTS_PARTNER_TOKEN:
-        header_variants.append({
-            "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
-            "Partner-Id": partner_id,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-
-    # --- Комбинированные заголовки ---
-    if YCLIENTS_USER_TOKEN and YCLIENTS_PARTNER_TOKEN:
-        header_variants.append({
+    header_variants = [
+        {
             "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
             "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
-            "Partner-Id": partner_id,
+            "Partner": partner_id,  # 👈 заменили Partner-Id → Partner
             "Accept": "application/json",
             "Content-Type": "application/json",
-        })
+        }
+    ]
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         for url in endpoints:
@@ -201,7 +182,7 @@ async def try_yclients_get_services() -> (int, Any):
 
                     r = await client.get(url, headers=headers)
                     logger.info(f"🔹 RESPONSE STATUS: {r.status_code}")
-                    logger.info(f"🔹 RESPONSE BODY: {r.text[:300]}")
+                    logger.info(f"🔹 RESPONSE BODY: {r.text[:400]}")
 
                     if r.status_code == 200:
                         try:
@@ -210,12 +191,13 @@ async def try_yclients_get_services() -> (int, Any):
                                 return r.status_code, data
                         except Exception:
                             pass
+
                 except Exception as e:
                     logger.exception("❌ Ошибка при запросе к YCLIENTS:", exc_info=e)
                     continue
 
-    return 500, {"error": "Не удалось получить список услуг — проверьте Partner ID в URL."}
-
+    return 500, {"error": "Не удалось получить список услуг — проверьте Partner Token или ID в настройках интеграции."}
+    
 async def try_yclients_create_booking(payload: Dict[str, Any]) -> (int, Any):
     """
     Попытка создать запись в YCLIENTS. Возвращает (status, response).
