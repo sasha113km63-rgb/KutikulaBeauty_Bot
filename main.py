@@ -324,8 +324,8 @@ async def telegram_webhook(request: Request):
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "")
 
-            # Простейший ответ пользователю
-            await send_message(chat_id, f"Вы написали: {text}")
+            # Обработка пользовательского сообщения через основную логику
+            await process_user_message(str(chat_id), text)
 
             # Отправка уведомления администратору (если включено)
             if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
