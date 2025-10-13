@@ -117,6 +117,6 @@ async def telegram_webhook(request: Request):
 
 
 # ---------- MAIN ----------
-if name == "__main__":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
