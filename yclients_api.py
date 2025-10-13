@@ -1,37 +1,64 @@
-import os
 import requests
-import logging
+from config import YCLIENTS_API_URL, COMPANY_ID, BEARER_TOKEN
 
-YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
-YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
-YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
-YCLIENTS_USER_TOKEN = os.getenv("YCLIENTS_USER_TOKEN")
+# --- Заголовки для авторизации ---
+HEADERS = {
+    "Accept": "application/vnd.yclients.v2+json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {BEARER_TOKEN}"
+}
 
+# --- Получить список услуг ---
 def get_services():
-    """
-    Получает список услуг из YCLIENTS через API и логирует подробности.
-    """
-    url = f"{YCLIENTS_API_BASE}/api/v1/company/{YCLIENTS_COMPANY_ID}/services"
-    headers = {
-        "Accept": "application/vnd.yclients.v2+json",
-        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {YCLIENTS_USER_TOKEN}"
+    url = f"{YCLIENTS_API_URL}/services/{COMPANY_ID}"
+    r = requests.get(url, headers=HEADERS)
+    return r.json()
+
+# --- Получить сотрудников (мастеров) ---
+def get_staff(service_id=None):
+    url = f"{YCLIENTS_API_URL}/staff/{COMPANY_ID}"
+    params = {}
+    if service_id:
+        params["service_id"] = service_id
+    r = requests.get(url, headers=HEADERS, params=params)
+    return r.json()
+
+# --- Получить доступное время для записи ---
+def get_times(staff_id, date, service_id):
+    url = f"{YCLIENTS_API_URL}/book_times/{COMPANY_ID}"
+    payload = {
+        "staff_id": staff_id,
+        "services": [service_id],
+        "date": date
     }
+    r = requests.post(url, headers=HEADERS, json=payload)
+    return r.json()
 
-    logging.info("🔍 Отправка запроса к YCLIENTS API: %s", url)
-    logging.info("🔑 Токены: PARTNER=%s..., USER=%s...", YCLIENTS_PARTNER_TOKEN[:6], YCLIENTS_USER_TOKEN[:6])
+# --- Создать запись ---
+def create_record(phone, name, staff_id, services, datetime_str):
+    url = f"{YCLIENTS_API_URL}/book_record/{COMPANY_ID}"
+    payload = {
+        "phone": phone,
+        "name": name,
+        "staff_id": staff_id,
+        "services": services,
+        "datetime": datetime_str,
+        "send_sms": 1
+    }
+    r = requests.post(url, headers=HEADERS, json=payload)
+    return r.json()
 
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        logging.info("📩 Ответ YCLIENTS: статус %s", response.status_code)
+# --- Получить список активных записей пользователя ---
+def get_company_records():
+    url = f"{YCLIENTS_API_URL}/records/{COMPANY_ID}"
+    r = requests.get(url, headers=HEADERS)
+    return r.json()
 
-        if response.status_code == 200:
-            data = response.json()
-            services = data.get("data", [])
-            logging.info("✅ Получено %s услуг", len(services))
-            return services
-        else:
-            logging.error("❌ Ошибка при получении услуг: %s — %s", response.status_code, response.text)
-            return []
-    except Exception as e:
-        logging.exception("⚠️ Исключение при запросе к YCLIENTS: %s", e)
-        return []
+# --- Отменить (удалить) запись ---
+def delete_record(record_id):
+    url = f"{YCLIENTS_API_URL}/records/{COMPANY_ID}/{record_id}"
+    r = requests.delete(url, headers=HEADERS)
+    if r.status_code == 200:
+        return {"success": True}
+    else:
+        return {"success": False, "error": r.text}
