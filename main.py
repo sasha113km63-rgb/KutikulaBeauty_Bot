@@ -177,7 +177,7 @@ async def call_openai_parse(user_text: str) -> Dict[str, Any]:
 async def try_yclients_get_services():
     """
     Получение списка услуг из YCLIENTS.
-    Использует корректный формат запроса с partner и токенами.
+    Исправленный вариант с корректными заголовками (Partner-Id).
     """
     import httpx
     import logging
@@ -190,7 +190,8 @@ async def try_yclients_get_services():
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
-        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN
+        "X-Partner-Token": YCLIENTS_PARTNER_TOKEN,
+        "Partner-Id": str(YCLIENTS_PARTNER_ID)  # 👈 Добавлено обязательно!
     }
 
     try:
@@ -214,32 +215,6 @@ async def try_yclients_get_services():
     except Exception as e:
         logger.exception(f"❌ Исключение при запросе YCLIENTS: {e}")
         return []
-
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        for url in endpoints:
-            for headers in header_variants:
-                try:
-                    logger.info(f"🔹 YCLIENTS TRY: {url}")
-                    safe_headers = {k: (v[:6] + "...") if "Token" in k or "Authorization" in k else v for k, v in headers.items()}
-                    logger.info(f"🔹 HEADERS: {safe_headers}")
-
-                    r = await client.get(url, headers=headers)
-                    logger.info(f"🔹 RESPONSE STATUS: {r.status_code}")
-                    logger.info(f"🔹 RESPONSE BODY: {r.text[:400]}")
-
-                    if r.status_code == 200:
-                        try:
-                            data = r.json()
-                            if isinstance(data, dict) and data.get("success"):
-                                return r.status_code, data
-                        except Exception:
-                            pass
-
-                except Exception as e:
-                    logger.exception("❌ Ошибка при запросе к YCLIENTS:", exc_info=e)
-                    continue
-
-    return 500, {"error": "Не удалось получить список услуг — проверьте Partner Token или ID в настройках интеграции."}
     
 async def try_yclients_create_booking(payload: Dict[str, Any]) -> (int, Any):
     """
