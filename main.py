@@ -28,6 +28,32 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com")
 BASE_URL = os.getenv("BASE_URL")
 
+# === СОЗДАЁМ ПРИЛОЖЕНИЕ ===
+app = FastAPI(title="KUTIKULA Bot")
+
+# === Приём уведомлений от YCLIENTS ===
+@app.post("/yclients-webhook")
+async def yclients_webhook(request: Request):
+    try:
+        data = await request.json()
+        print("📩 Incoming YCLIENTS webhook:", data)
+
+        if "data" in data and "record" in data["data"]:
+            record = data["data"]["record"]
+            name = record.get("client", {}).get("name", "Неизвестный клиент")
+            service = record.get("services", [{}])[0].get("title", "Без услуги")
+            time = record.get("datetime", "Не указано")
+
+            if ADMIN_CHAT_ID:
+                msg = f"📝 Новая запись!\n👤 {name}\n💅 {service}\n⏰ {time}"
+                await send_message(ADMIN_CHAT_ID, msg)
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        print("❌ Ошибка при обработке YCLIENTS webhook:", e)
+        return {"status": "error", "detail": str(e)}
+
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
 
