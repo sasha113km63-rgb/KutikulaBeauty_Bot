@@ -55,9 +55,18 @@ def save_dialogs(data: Dict[str, Any]):
     with open(DIALOGS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def append_dialog(chat_id: str, entry: Dict[str, Any]):
+def append_dialog(chat_id, entry):
     data = load_dialogs()
-    data.setdefault(chat_id, []).append(entry)
+
+    # Если файл пустой или содержит список — заменим его на словарь
+    if not isinstance(data, dict):
+        data = {}
+
+    # Добавляем запись
+    if chat_id not in data:
+        data[chat_id] = []
+
+    data[chat_id].append(entry)
     save_dialogs(data)
 
 async def call_openai_parse(user_text: str) -> Dict[str, Any]:
