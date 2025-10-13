@@ -154,11 +154,13 @@ async def try_yclients_get_services() -> (int, Any):
     Возвращает (status_code, data).
     """
     base = YCLIENTS_API_BASE.rstrip("/")
+
+    # ✅ Добавляем ещё один типичный вариант — company/{branch_id}/services
     endpoints = [
-        f"{base}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",
-        f"{base}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",
-        f"{base}/api/v1/services?company_id={YCLIENTS_COMPANY_ID}",
-        f"{base}/api/v1/companies/services?company_id={YCLIENTS_COMPANY_ID}",
+        f"{base}/api/v1/company/{YCLIENTS_COMPANY_ID}/services",     # основной
+        f"{base}/api/v1/companies/{YCLIENTS_COMPANY_ID}/services",   # альтернативный
+        f"{base}/api/v1/services/{YCLIENTS_COMPANY_ID}",             # старый вариант
+        f"{base}/api/v1/service/list/{YCLIENTS_COMPANY_ID}",         # иногда используется
     ]
 
     header_variants = []
@@ -186,7 +188,7 @@ async def try_yclients_get_services() -> (int, Any):
             "Content-Type": "application/json",
         })
 
-    # --- Вариант C: Оба токена вместе (иногда требует API YCLIENTS) ---
+    # --- Вариант C: Оба токена вместе (часто нужно в продакшене) ---
     if YCLIENTS_USER_TOKEN and YCLIENTS_PARTNER_TOKEN:
         header_variants.append({
             "Authorization": f"Bearer {YCLIENTS_USER_TOKEN}",
@@ -196,7 +198,7 @@ async def try_yclients_get_services() -> (int, Any):
             "Content-Type": "application/json",
         })
 
-    # --- Попытки вызова API ---
+    # --- Попытки запроса ---
     async with httpx.AsyncClient(timeout=20.0) as client:
         for url in endpoints:
             for headers in header_variants:
@@ -209,11 +211,14 @@ async def try_yclients_get_services() -> (int, Any):
                     logger.info(f"🔹 RESPONSE STATUS: {r.status_code}")
                     logger.info(f"🔹 RESPONSE BODY: {r.text[:300]}")
 
+                    # успех
                     if r.status_code == 200:
                         try:
-                            return r.status_code, r.json()
+                            data = r.json()
+                            if isinstance(data, dict) and data.get("success"):
+                                return r.status_code, data
                         except Exception:
-                            return r.status_code, r.text
+                            pass
 
                 except Exception as e:
                     logger.exception("❌ Ошибка при запросе к YCLIENTS:", exc_info=e)
