@@ -1,95 +1,134 @@
 import os
-import telebot
-import requests
+import json
+import logging
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
+import httpx
+import requests
 
-# ------------------- Загрузка переменных окружения -------------------
-load_dotenv()
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("kutikula_bot")
 
+# Основное приложение
+app = FastAPI()
+
+# --- Настройки из переменных окружения ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-YCLIENTS_API_BASE = os.getenv("YCLIENTS_API_BASE", "https://api.yclients.com/api/v1/")
-YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID")
 YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
 YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN")
 YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN не найден. Проверь настройки окружения Render.")
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-app = FastAPI()
+# --- Глобальный токен пользователя YCLIENTS ---
+YCLIENTS_USER_TOKEN = None
 
 
-# ------------------- Проверка подключения к YCLIENTS -------------------
+# --- Авторизация в YCLIENTS ---
 def yclients_auth():
-    """Авторизация по логину и паролю (без SMS)."""
-    url = f"{YCLIENTS_API_BASE}auth"
-    headers = {
-        "Accept": "application/vnd.yclients.v2+json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"
-    }
-    data = {
-        "login": YCLIENTS_LOGIN,
-        "password": YCLIENTS_PASSWORD
-    }
+    """Авторизация в YCLIENTS и получение user_token"""
+    global YCLIENTS_USER_TOKEN
+    try:
+        url = "https://api.yclients.com/api/v1/auth"
+        headers = {
+            "Accept": "application/vnd.yclients.v2+json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"
+        }
+        payload = {"login": YCLIENTS_LOGIN, "password": YCLIENTS_PASSWORD}
 
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200 and response.json().get("success"):
-        return response.json()["data"]["user_token"]
-    else:
-        print("❌ Ошибка авторизации YCLIENTS:", response.text)
+        response = requests.post(url, json=payload, headers=headers)
+        data = response.json()
+
+        if data.get("success"):
+            YCLIENTS_USER_TOKEN = data["data"]["user_token"]
+            logger.info("✅ Авторизация YCLIENTS успешна")
+            return YCLIENTS_USER_TOKEN
+        else:
+            logger.error(f"❌ Ошибка авторизации YCLIENTS: {data}")
+            return None
+    except Exception as e:
+        logger.exception("Ошибка при авторизации YCLIENTS")
         return None
 
 
-# ------------------- Обработчики Telegram -------------------
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.send_message(
-        message.chat.id,
-        "Привет 👋\nЯ — бот для записи в Kutikula Beauty.\n\n"
-        "Пока я умею:\n"
-        "🗓 Проверять подключение к YCLIENTS\n"
-        "❌ Отменять запись (скоро)\n"
-        "👀 Смотреть свои брони (скоро)\n\n"
-        "Для проверки подключения напиши: /check"
-    )
+# --- Получение списка услуг ---
+async def try_yclients_get_services():
+    """Получает список услуг компании"""
+    try:
+        company_id = 530777  # ID компании (замени на свой!)
+        url = f"https://api.yclients.com/api/v1/company/{company_id}/services"
+
+        headers = {
+            "Accept": "application/vnd.yclients.v2+json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {YCLIENTS_USER_TOKEN}"
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers)
+            data = response.json()
+
+        if data.get("success"):
+            services = [srv["title"] for srv in data.get("data", [])]
+            logger.info(f"✅ Получено {len(services)} услуг")
+            return "\n".join(services) if services else "Список услуг пуст."
+        else:
+            logger.error(f"❌ Ошибка при получении услуг: {data}")
+            return f"Ошибка YCLIENTS: {data.get('meta', {}).get('message', 'Неизвестная ошибка')}"
+    except Exception as e:
+        logger.exception("Ошибка при запросе услуг")
+        return "Произошла ошибка при получении списка услуг."
 
 
-@bot.message_handler(commands=["check"])
-def check_yclients(message):
-    token = yclients_auth()
-    if token:
-        bot.send_message(message.chat.id, "✅ Подключение к YCLIENTS успешно!")
-    else:
-        bot.send_message(message.chat.id, "❌ Ошибка авторизации в YCLIENTS.")
+# --- Telegram: обработка сообщений ---
+async def send_message(chat_id: int, text: str):
+    """Отправка сообщения пользователю"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=payload)
 
 
-@bot.message_handler(func=lambda message: True)
-def echo_message(message):
-    bot.reply_to(message, "Напишите /start, чтобы начать.")
-
-
-# ------------------- FastAPI webhook -------------------
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
-    """Получаем обновления от Telegram"""
-    data = await request.json()
-    update = telebot.types.Update.de_json(data)
-    bot.process_new_updates([update])
-    return JSONResponse(status_code=200, content={"ok": True})
+    """Главный обработчик Telegram"""
+    update = await request.json()
+    logger.info(f"📩 Incoming Telegram update: {json.dumps(update, ensure_ascii=False)}")
+
+    if "message" not in update:
+        return {"ok": True}
+
+    message = update["message"]
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "")
+
+    # Обработка команд
+    if text == "/start":
+        await send_message(chat_id, "Привет! Я бот для записи через YCLIENTS 💅\n\n"
+                                    "Доступные команды:\n"
+                                    "• /services — список услуг\n"
+                                    "• /help — помощь")
+    elif text == "/services":
+        services_text = await try_yclients_get_services()
+        await send_message(chat_id, f"📋 Услуги:\n{services_text}")
+    elif text == "/help":
+        await send_message(chat_id, "Команды:\n"
+                                    "/start — начать\n"
+                                    "/services — показать список услуг\n"
+                                    "/help — помощь")
+    else:
+        await send_message(chat_id, "Извини, я не понял 😅. Введи /help для списка команд.")
+
+    return {"ok": True}
 
 
-# ------------------- Health check -------------------
 @app.get("/")
-def home():
-    return {"status": "ok", "message": "Kutikula Beauty Bot работает 🩷"}
+async def home():
+    return {"status": "ok", "message": "Бот работает 🚀"}
 
 
-# ------------------- Запуск -------------------
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+# --- Запуск авторизации при старте ---
+YCLIENTS_USER_TOKEN = yclients_auth()
+if not YCLIENTS_USER_TOKEN:
+    logger.error("⚠️ Не удалось авторизоваться в YCLIENTS. Проверь логин/пароль.")
+else:
+    logger.info("🔐 user_token получен успешно.")
