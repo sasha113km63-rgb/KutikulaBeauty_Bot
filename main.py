@@ -72,6 +72,62 @@ async def telegram_webhook(request: Request):
 
         return JSONResponse(content={"ok": True})
 
+   @app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    """Обработка входящих сообщений от Telegram"""
+    update = await request.json()
+    logger.info(f"📩 Incoming update: {update}")
+
+    message = update.get("message")
+    if not message:
+        return JSONResponse(content={"ok": True})
+
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip().lower()
+
+    # --- Обработка приветствия ---
+    greetings = ["привет", "здравствуйте", "добрый день", "доброе утро", "добрый вечер", "hi", "hello", "/start"]
+    if any(word in text for word in greetings):
+        reply = (
+            "Здравствуйте!🌸\n"
+            "Я — виртуальный администратор *beauty studio KUTIKULA* 💅\n\n"
+            "Чем могу помочь?\n"
+            "▫ Записаться на процедуру\n"
+            "▫ Посмотреть услуги\n"
+            "▫ Узнать расписание мастеров"
+        )
+        await send_message(chat_id, reply)
+
+        # Показ категорий
+        categories = await get_categories()
+        if not categories:
+            await send_message(chat_id, "❌ Не удалось загрузить категории услуг.")
+        else:
+            msg = "Выберите категорию услуг:\n\n"
+            for c in categories:
+                msg += f"• {c['title']}\n"
+            await send_message(chat_id, msg)
+
+        return JSONResponse(content={"ok": True})
+
+    # --- Обработка выбора категории ---
+    categories = await get_categories()
+    if categories:
+        selected = next((c for c in categories if c["title"].lower() == text), None)
+        if selected:
+            await send_message(chat_id, f"📋 Отлично! Вы выбрали категорию: {selected['title']}\nЗагружаю услуги...")
+
+            services = await get_services_by_category(selected["id"])
+            if not services:
+                await send_message(chat_id, "❌ Не удалось получить услуги этой категории.")
+            else:
+                msg = f"💅 *Услуги в категории {selected['title']}:*\n\n"
+                for s in services:
+                    price = s.get("price_min") or s.get("price") or 0
+                    msg += f"• {s['title']} — {price} ₽\n"
+                await send_message(chat_id, msg)
+            return JSONResponse(content={"ok": True})
+
     # --- Неизвестное сообщение ---
     await send_message(chat_id, "Извините, я вас не поняла 😅. Напишите «привет» для начала.")
     return JSONResponse(content={"ok": True})
