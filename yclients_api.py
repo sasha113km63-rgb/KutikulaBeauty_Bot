@@ -1,16 +1,57 @@
-import aiohttp
+import os
+import json
 import logging
-from config import (
-    YCLIENTS_COMPANY_ID,
-    YCLIENTS_PARTNER_TOKEN,
-    YCLIENTS_LOGIN,
-    YCLIENTS_PASSWORD,
-)
+from fastapi import FastAPI, Request
+import httpx
+import requests
 
-logger = logging.getLogger("yclients_api")
 
-BASE_URL = "https://api.yclients.com/api/v1"
-user_token = None  # Кэш для токена пользователя
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("kutikula_bot")
+
+
+# Основное приложение
+app = FastAPI()
+
+
+# --- Настройки из переменных окружения ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
+YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN")
+YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD")
+
+
+# --- Глобальный токен пользователя YCLIENTS ---
+YCLIENTS_USER_TOKEN = None
+
+
+# --- Авторизация в YCLIENTS ---
+def yclients_auth():
+    """Авторизация в YCLIENTS и получение user_token"""
+    global YCLIENTS_USER_TOKEN
+    try:
+        url = "https://api.yclients.com/api/v1/auth"
+        headers = {
+            "Accept": "application/vnd.yclients.v2+json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"
+        }
+        payload = {"login": YCLIENTS_LOGIN, "password": YCLIENTS_PASSWORD}
+
+        response = requests.post(url, json=payload, headers=headers)
+        data = response.json()
+
+        if data.get("success"):
+            YCLIENTS_USER_TOKEN = data["data"]["user_token"]
+            logger.info("✅ Авторизация YCLIENTS успешна")
+            return YCLIENTS_USER_TOKEN
+        else:
+            logger.error(f"❌ Ошибка авторизации YCLIENTS: {data}")
+            return None
+    except Exception as e:
+        logger.exception("Ошибка при авторизации YCLIENTS")
+        return None
 
 
 async def get_headers():
