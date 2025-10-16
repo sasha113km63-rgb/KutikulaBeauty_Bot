@@ -40,9 +40,9 @@ async def get_user_token():
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as resp:
             result = await resp.json()
-            if resp.status == 200 and result.get("success"):
+            if result.get("success") and result.get("data"):
                 user_token = result["data"]["user_token"]
-                logger.info(f"✅ Получен новый user_token: {user_token[:8]}...")
+                logger.info(f"✅ Авторизация успешна. user_token: {user_token[:8]}...")
                 return user_token
             else:
                 logger.error(f"❌ Ошибка авторизации: {result}")
@@ -51,15 +51,21 @@ async def get_user_token():
 
 # --- Заголовки авторизации ---
 async def get_headers():
+    """
+    Возвращает корректные заголовки авторизации для всех запросов YCLIENTS.
+    """
     global user_token
     if not user_token:
         user_token = await get_user_token()
 
-    return {
+    headers = {
         "Accept": "application/vnd.yclients.v2+json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}"
     }
+
+    logger.info(f"✅ Заголовки сформированы корректно.")
+    return headers
 
 
 # --- Получение категорий услуг ---
