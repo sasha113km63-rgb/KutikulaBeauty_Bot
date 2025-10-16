@@ -15,8 +15,7 @@ user_token = None  # Кэш для токена пользователя
 
 async def get_headers():
     """
-    Возвращает заголовки для авторизации.
-    Если user_token отсутствует — запрашивает новый.
+    Возвращает корректные заголовки авторизации для YCLIENTS.
     """
     global user_token
     if not user_token:
@@ -25,7 +24,8 @@ async def get_headers():
     headers = {
         "Accept": "application/vnd.yclients.v2+json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}",
+        "User-Auth-Token": user_token or "",
     }
     return headers
 
