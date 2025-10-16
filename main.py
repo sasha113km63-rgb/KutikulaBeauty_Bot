@@ -61,3 +61,23 @@ def show_categories(chat_id):
 @app.get("/")
 def root():
     return {"status": "bot running"}
+
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi import Request
+import logging
+
+app = FastAPI()
+logger = logging.getLogger("main")
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Kutikula bot is running"}
+
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    update = await request.json()
+    # Здесь логика обработки сообщений от Telegram
+    logger.info(f"📩 Incoming update: {update}")
+    return JSONResponse(content={"ok": True})
