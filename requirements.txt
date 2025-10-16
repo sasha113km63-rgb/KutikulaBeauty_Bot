@@ -1,7 +1,9 @@
 fastapi
-httpx[http2]
 uvicorn
 gunicorn
-openai
-pyTelegramBotAPI
+requests
+httpx
+aiohttp
+pytelegrambotapi
 python-dotenv
+openai
