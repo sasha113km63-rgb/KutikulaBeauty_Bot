@@ -1,7 +1,9 @@
 import logging
-from fastapi import FastAPI, Request
+import aiohttp
 import asyncio
-import telebot
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from config import TELEGRAM_TOKEN
 from yclients_api import (
     get_categories,
     get_services_by_category,
@@ -9,75 +11,67 @@ from yclients_api import (
     get_free_times,
     create_booking,
 )
-from config import TELEGRAM_TOKEN
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
-# --- FastAPI приложение ---
+# --- Telegram API ---
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# --- FastAPI ---
 app = FastAPI()
 
-# --- Telegram бот ---
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
+async def send_message(chat_id: int, text: str):
+    """Отправка сообщения пользователю через Telegram API"""
+    async with aiohttp.ClientSession() as session:
+        await session.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
-@app.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = telebot.types.Update.de_json(data)
-    bot.process_new_updates([update])
-    return {"ok": True}
-
-
-# --- Команда приветствия ---
-@bot.message_handler(commands=["start"])
-def start_message(message):
-    bot.reply_to(
-        message,
-        "Здравствуйте!🌸\n"
-        "Я — виртуальный администратор beauty studio KUTIKULA.\n"
-        "Чем могу помочь? 💅",
-    )
-    show_categories(message.chat.id)
-
-
-def show_categories(chat_id):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    categories = loop.run_until_complete(get_categories())
-
-    if not categories:
-        bot.send_message(chat_id, "❌ Не удалось загрузить категории.")
-        return
-
-    text = "Выберите категорию:\n\n"
-    for c in categories:
-        text += f"• {c['title']}\n"
-    bot.send_message(chat_id, text)
-
-
-# --- Тест ---
-@app.get("/")
-def root():
-    return {"status": "bot running"}
-
-
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi import Request
-import logging
-
-app = FastAPI()
-logger = logging.getLogger("main")
 
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "Kutikula bot is running"}
 
+
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
+    """Обработка входящих сообщений от Telegram"""
     update = await request.json()
-    # Здесь логика обработки сообщений от Telegram
     logger.info(f"📩 Incoming update: {update}")
+
+    message = update.get("message")
+    if not message:
+        return JSONResponse(content={"ok": True})
+
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip().lower()
+
+    # --- Обработка приветствия ---
+    greetings = ["привет", "здравствуйте", "добрый день", "доброе утро", "добрый вечер", "hi", "hello", "/start"]
+    if any(word in text for word in greetings):
+        reply = (
+            "Здравствуйте!🌸\n"
+            "Я — виртуальный администратор *beauty studio KUTIKULA* 💅\n\n"
+            "Чем могу помочь?\n"
+            "▫ Записаться на процедуру\n"
+            "▫ Посмотреть услуги\n"
+            "▫ Узнать расписание мастеров"
+        )
+        await send_message(chat_id, reply)
+
+        # Показ категорий
+        categories = await get_categories()
+        if not categories:
+            await send_message(chat_id, "❌ Не удалось загрузить категории услуг.")
+        else:
+            msg = "Выберите категорию услуг:\n\n"
+            for c in categories:
+                msg += f"• {c['title']}\n"
+            await send_message(chat_id, msg)
+
+        return JSONResponse(content={"ok": True})
+
+    # --- Неизвестное сообщение ---
+    await send_message(chat_id, "Извините, я вас не поняла 😅. Напишите «привет» для начала.")
     return JSONResponse(content={"ok": True})
