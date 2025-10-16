@@ -34,6 +34,7 @@ async def get_user_token():
     """
     Получение user_token по логину и паролю (авторизация администратора).
     """
+    logger.info(f"🔐 Авторизация в YCLIENTS с логином: {YCLIENTS_LOGIN}")
     url = f"{BASE_URL}/auth"
     data = {"login": YCLIENTS_LOGIN, "password": YCLIENTS_PASSWORD}
 
