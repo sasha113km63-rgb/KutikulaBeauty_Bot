@@ -1,134 +1,180 @@
-import os
-import json
+import aiohttp
 import logging
-from fastapi import FastAPI, Request
-import httpx
-import requests
+from config import (
+    YCLIENTS_COMPANY_ID,
+    YCLIENTS_PARTNER_TOKEN,
+    YCLIENTS_LOGIN,
+    YCLIENTS_PASSWORD,
+)
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("kutikula_bot")
+logger = logging.getLogger("yclients_api")
 
-# Основное приложение
-app = FastAPI()
-
-# --- Настройки из переменных окружения ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-YCLIENTS_PARTNER_TOKEN = os.getenv("YCLIENTS_PARTNER_TOKEN")
-YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN")
-YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD")
-
-# --- Глобальный токен пользователя YCLIENTS ---
-YCLIENTS_USER_TOKEN = None
+BASE_URL = "https://api.yclients.com/api/v1"
+user_token = None  # Кэш для токена пользователя
 
 
-# --- Авторизация в YCLIENTS ---
-def yclients_auth():
-    """Авторизация в YCLIENTS и получение user_token"""
-    global YCLIENTS_USER_TOKEN
-    try:
-        url = "https://api.yclients.com/api/v1/auth"
-        headers = {
-            "Accept": "application/vnd.yclients.v2+json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}"
-        }
-        payload = {"login": YCLIENTS_LOGIN, "password": YCLIENTS_PASSWORD}
+async def get_headers():
+    """
+    Возвращает заголовки для авторизации.
+    Если user_token отсутствует — запрашивает новый.
+    """
+    global user_token
+    if not user_token:
+        user_token = await get_user_token()
 
-        response = requests.post(url, json=payload, headers=headers)
-        data = response.json()
+    headers = {
+        "Accept": "application/vnd.yclients.v2+json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {user_token}",
+    }
+    return headers
 
-        if data.get("success"):
-            YCLIENTS_USER_TOKEN = data["data"]["user_token"]
-            logger.info("✅ Авторизация YCLIENTS успешна")
-            return YCLIENTS_USER_TOKEN
-        else:
-            logger.error(f"❌ Ошибка авторизации YCLIENTS: {data}")
-            return None
-    except Exception as e:
-        logger.exception("Ошибка при авторизации YCLIENTS")
+
+async def get_user_token():
+    """
+    Получение user_token по логину и паролю (авторизация администратора).
+    """
+    url = f"{BASE_URL}/auth"
+    data = {"login": YCLIENTS_LOGIN, "password": YCLIENTS_PASSWORD}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=data) as resp:
+            result = await resp.json()
+            if resp.status == 200 and result.get("data"):
+                token = result["data"]["user_token"]
+                logger.info(f"✅ Получен новый user_token: {token[:6]}...")
+                return token
+            else:
+                logger.error(f"❌ Ошибка авторизации: {result}")
+                return None
+
+
+# --- Получение категорий услуг ---
+async def get_categories():
+    """
+    Получить список категорий услуг компании.
+    """
+    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/service_categories"
+    headers = await get_headers()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            if data.get("success"):
+                return data["data"]
+            logger.error(f"Ошибка получения категорий: {data}")
+            return []
+
+
+# --- Получение услуг в категории ---
+async def get_services_by_category(category_id):
+    """
+    Получить услуги конкретной категории.
+    """
+    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/services"
+    headers = await get_headers()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                logger.error(f"Ошибка получения услуг: {data}")
+                return []
+
+            # Фильтруем по категории
+            services = [s for s in data["data"] if s["category_id"] == category_id]
+            return services
+
+
+# --- Получение мастеров ---
+async def get_masters_for_service(service_id):
+    """
+    Получить мастеров, предоставляющих конкретную услугу.
+    """
+    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/staff"
+    headers = await get_headers()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                logger.error(f"Ошибка получения мастеров: {data}")
+                return []
+
+            masters = [m for m in data["data"] if service_id in m.get("services", [])]
+            return masters
+
+
+# --- Получение свободного времени ---
+async def get_free_times(staff_id, service_id):
+    """
+    Получить список доступных временных слотов для записи.
+    """
+    url = f"{BASE_URL}/book_times/{YCLIENTS_COMPANY_ID}/{staff_id}/{service_id}"
+    headers = await get_headers()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                logger.error(f"Ошибка получения свободного времени: {data}")
+                return []
+
+            times = []
+            for day in data["data"]:
+                for time in day["times"]:
+                    times.append(f"{day['date']} {time}")
+            return times
+
+
+# --- Создание клиента ---
+async def create_client(name, last_name, phone):
+    """
+    Создать клиента (если его ещё нет).
+    """
+    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/clients"
+    headers = await get_headers()
+    payload = {"name": f"{name} {last_name}", "phone": phone}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            data = await resp.json()
+            if data.get("success"):
+                logger.info(f"✅ Клиент создан/обновлён: {phone}")
+                return data["data"]
+            else:
+                logger.error(f"Ошибка создания клиента: {data}")
+                return None
+
+
+# --- Создание записи ---
+async def create_booking(name, last_name, phone, service_id, master_id, time):
+    """
+    Создать запись клиента.
+    """
+    client = await create_client(name, last_name, phone)
+    if not client:
         return None
 
+    url = f"{BASE_URL}/book_record/{YCLIENTS_COMPANY_ID}"
+    headers = await get_headers()
+    payload = {
+        "staff_id": master_id,
+        "services": [{"id": service_id}],
+        "client": {
+            "id": client["id"],
+            "name": client["name"],
+            "phone": client["phone"],
+        },
+        "datetime": time,
+    }
 
-# --- Получение списка услуг ---
-async def try_yclients_get_services():
-    """Получает список услуг компании"""
-    try:
-        company_id = 530777  # ID компании (замени на свой!)
-        url = f"https://api.yclients.com/api/v1/company/{company_id}/services"
-
-        headers = {
-            "Accept": "application/vnd.yclients.v2+json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {YCLIENTS_PARTNER_TOKEN}, User {YCLIENTS_USER_TOKEN}"
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers)
-            data = response.json()
-
-        if data.get("success"):
-            services = [srv["title"] for srv in data.get("data", [])]
-            logger.info(f"✅ Получено {len(services)} услуг")
-            return "\n".join(services) if services else "Список услуг пуст."
-        else:
-            logger.error(f"❌ Ошибка при получении услуг: {data}")
-            return f"Ошибка YCLIENTS: {data.get('meta', {}).get('message', 'Неизвестная ошибка')}"
-    except Exception as e:
-        logger.exception("Ошибка при запросе услуг")
-        return "Произошла ошибка при получении списка услуг."
-
-
-# --- Telegram: обработка сообщений ---
-async def send_message(chat_id: int, text: str):
-    """Отправка сообщения пользователю"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
-
-
-@app.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-    """Главный обработчик Telegram"""
-    update = await request.json()
-    logger.info(f"📩 Incoming Telegram update: {json.dumps(update, ensure_ascii=False)}")
-
-    if "message" not in update:
-        return {"ok": True}
-
-    message = update["message"]
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
-
-    # Обработка команд
-    if text == "/start":
-        await send_message(chat_id, "Привет! Я бот для записи через YCLIENTS 💅\n\n"
-                                    "Доступные команды:\n"
-                                    "• /services — список услуг\n"
-                                    "• /help — помощь")
-    elif text == "/services":
-        services_text = await try_yclients_get_services()
-        await send_message(chat_id, f"📋 Услуги:\n{services_text}")
-    elif text == "/help":
-        await send_message(chat_id, "Команды:\n"
-                                    "/start — начать\n"
-                                    "/services — показать список услуг\n"
-                                    "/help — помощь")
-    else:
-        await send_message(chat_id, "Извини, я не понял 😅. Введи /help для списка команд.")
-
-    return {"ok": True}
-
-
-@app.get("/")
-async def home():
-    return {"status": "ok", "message": "Бот работает 🚀"}
-
-
-# --- Запуск авторизации при старте ---
-YCLIENTS_USER_TOKEN = yclients_auth()
-if not YCLIENTS_USER_TOKEN:
-    logger.error("⚠️ Не удалось авторизоваться в YCLIENTS. Проверь логин/пароль.")
-else:
-    logger.info("🔐 user_token получен успешно.")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            data = await resp.json()
+            if data.get("success"):
+                logger.info(f"✅ Запись успешно создана: {data['data']['id']}")
+                return data["data"]
+            else:
+                logger.error(f"Ошибка при создании записи: {data}")
+                return None
