@@ -72,7 +72,7 @@ async def telegram_webhook(request: Request):
 
         return JSONResponse(content={"ok": True})
 
-   @app.post("/telegram-webhook")
+@app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
     """Обработка входящих сообщений от Telegram"""
     update = await request.json()
