@@ -207,7 +207,7 @@ async def create_booking(name, last_name, phone, service_id, master_id, time):
                 except Exception as e:
                     logger.error(f"Ошибка при отправке уведомления: {e}")
 
-                 return booking
+                return booking
             else:
                 logger.error(f"Ошибка при создании записи: {data}")
                 return None
