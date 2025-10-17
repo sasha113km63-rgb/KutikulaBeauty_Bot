@@ -20,6 +20,15 @@ YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID", "530777")  # <-- доба
 
 BASE_URL = "https://api.yclients.com/api/v1"  # <-- добавлено
 
+
+# --- Импорт уведомлений (файл notifications.py) ---
+from notifications import (
+    send_new_booking_notification,
+    send_cancel_notification,
+    send_bonus_notification,
+)
+
+
 # --- Глобальный токен пользователя YCLIENTS ---
 user_token = None
 
@@ -176,8 +185,29 @@ async def create_booking(name, last_name, phone, service_id, master_id, time):
         async with session.post(url, headers=headers, json=payload) as resp:
             data = await resp.json()
             if data.get("success"):
-                logger.info(f"✅ Запись успешно создана: {data['data']['id']}")
-                return data["data"]
+    booking = data["data"]
+    logger.info(f"✅ Запись успешно создана: {booking['id']}")
+
+    # --- Отправляем уведомление клиенту ---
+    client_info = {
+        "name": client["name"],
+        "telegram_id": client.get("telegram_id", None),  # позже можно будет подставлять
+    }
+    booking_info = {
+        "service_name": booking["services"][0]["title"] if booking.get("services") else "Услуга",
+        "day_month": booking["datetime"].split(" ")[0],
+        "start_time": booking["datetime"].split(" ")[1],
+        "staff_name": booking.get("staff", {}).get("name", "Мастер"),
+        "price": booking["services"][0].get("cost", "—") if booking.get("services") else "—",
+    }
+
+    # Отправляем сообщение клиенту в Telegram
+    try:
+        await send_new_booking_notification(client_info, booking_info)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления: {e}")
+
+    return booking
             else:
                 logger.error(f"Ошибка при создании записи: {data}")
                 return None
