@@ -3,6 +3,3 @@ uvicorn
 gunicorn
 aiohttp
 python-dotenv
-
-SQLAlchemy>=2.0
-asyncpg
