@@ -1,8 +1,8 @@
 fastapi
-httpx[http2]
 uvicorn
 gunicorn
-openai
-pyTelegramBotAPI
-python-dotenv
 aiohttp
+python-dotenv
+
+SQLAlchemy>=2.0
+asyncpg
