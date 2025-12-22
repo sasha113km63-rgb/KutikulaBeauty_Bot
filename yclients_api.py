@@ -3,6 +3,7 @@ import json
 import logging
 import aiohttp
 from fastapi import FastAPI
+from datetime import datetime
 
 # --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO)
