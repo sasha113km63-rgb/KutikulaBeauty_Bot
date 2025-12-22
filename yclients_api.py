@@ -234,3 +234,35 @@ async def create_booking(name, last_name, phone, service_id, master_id, time):
             else:
                 logger.error(f"Ошибка при создании записи: {data}")
                 return None
+
+
+async def get_available_times(service_id: int, staff_id: int, date_str: str):
+    """
+    Возвращает свободное время на дату для выбранных услуги и мастера.
+    date_str пример: '2025-12-21'
+    """
+    headers = await get_headers()
+
+    # В YCLIENTS чаще всего это booking endpoint: book_times
+    url = f"{BASE_URL}/book_times/{YCLIENTS_COMPANY_ID}"
+    params = {
+        "staff_id": staff_id,
+        "date": date_str,
+        "service_ids[]": service_id,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            data = await resp.json()
+
+            if not data.get("success"):
+                logger.error(f"Ошибка получения времени: {data}")
+                return []
+
+            # В разных аккаунтах формат может отличаться.
+            # Самый частый: data["data"] = ["10:00", "10:30", ...]
+            times = data.get("data", [])
+            if isinstance(times, list):
+                return times
+
+            return []
