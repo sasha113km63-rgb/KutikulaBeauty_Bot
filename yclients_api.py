@@ -108,9 +108,30 @@ async def get_services_by_category(category_id):
 
 
 # --- Получение мастеров ---
-async def get_masters_for_service(service_id):
-    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/staff"
+async def get_masters_for_service(service_id: int):
+    """
+    Правильный способ: берем мастеров через booking endpoint book_staff,
+    иначе /staff часто не содержит services у мастеров.
+    """
     headers = await get_headers()
+
+    # 1) Пробуем через book_staff (самый правильный для записи)
+    url = f"{BASE_URL}/book_staff/{YCLIENTS_COMPANY_ID}"
+    params = {
+        # разные аккаунты YCLIENTS принимают разные варианты параметра,
+        # поэтому отправляем service_ids[] (самый частый формат)
+        "service_ids[]": service_id
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            data = await resp.json()
+
+            if data.get("success") and isinstance(data.get("data"), list) and len(data["data"]) > 0:
+                return data["data"]
+
+    # 2) Фолбэк: если вдруг book_staff не отработал, пробуем старый способ через /staff
+    url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/staff"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
@@ -120,10 +141,11 @@ async def get_masters_for_service(service_id):
                 return []
 
             masters = []
-            for m in data["data"]:
-                service_ids = [s["id"] for s in m.get("services", [])]
+            for m in data.get("data", []):
+                service_ids = [s.get("id") for s in m.get("services", []) if isinstance(s, dict)]
                 if service_id in service_ids:
                     masters.append(m)
+
             return masters
 
 
