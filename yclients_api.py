@@ -168,21 +168,36 @@ async def get_free_times(staff_id, service_id):
             return times
 
 
-# --- Создание клиента ---
+# --- Создание/обновление клиента ---
 async def create_client(name, last_name, phone):
     url = f"{BASE_URL}/company/{YCLIENTS_COMPANY_ID}/clients"
     headers = await get_headers()
-    payload = {"name": f"{name} {last_name}", "phone": phone}
+    payload = {"name": f"{name} {last_name}".strip(), "phone": phone}
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as resp:
             data = await resp.json()
-            if data.get("success"):
-                logger.info(f"✅ Клиент создан/обновлён: {phone}")
-                return data["data"]
-            else:
+
+            if not data.get("success"):
                 logger.error(f"Ошибка создания клиента: {data}")
                 return None
+
+            client_data = data.get("data")
+
+            # ВАЖНО: иногда YCLIENTS возвращает список
+            if isinstance(client_data, list):
+                if not client_data:
+                    logger.error(f"YCLIENTS вернул пустой список клиента: {data}")
+                    return None
+                client_data = client_data[0]
+
+            # Ожидаем словарь клиента
+            if not isinstance(client_data, dict) or "id" not in client_data:
+                logger.error(f"Неожиданный формат клиента: {client_data}")
+                return None
+
+            logger.info(f"✅ Клиент создан/обновлён: {phone}")
+            return client_data
 
 
 # --- Создание записи ---
@@ -193,23 +208,38 @@ async def create_booking(name, last_name, phone, service_id, master_id, time):
 
     url = f"{BASE_URL}/book_record/{YCLIENTS_COMPANY_ID}"
     headers = await get_headers()
+
     payload = {
         "staff_id": master_id,
         "services": [{"id": service_id}],
         "client": {
             "id": client["id"],
-            "name": client["name"],
-            "phone": client["phone"],
+            "name": client.get("name", f"{name} {last_name}".strip()),
+            "phone": client.get("phone", phone),
         },
-        "datetime": time,
+        "datetime": time,  # формат "YYYY-MM-DD HH:MM"
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as resp:
             data = await resp.json()
-            if data.get("success"):
-                booking = data["data"]
-                logger.info(f"✅ Запись успешно создана: {booking['id']}")
+
+            if not data.get("success"):
+                logger.error(f"Ошибка при создании записи: {data}")
+                return None
+
+            booking = data.get("data")
+
+            # иногда тоже может быть список
+            if isinstance(booking, list):
+                booking = booking[0] if booking else None
+
+            if not booking:
+                logger.error(f"Пустые данные записи: {data}")
+                return None
+
+            logger.info(f"✅ Запись создана: {booking}")
+            return booking
 
                 # --- Отправляем уведомление клиенту ---
                 client_info = {
