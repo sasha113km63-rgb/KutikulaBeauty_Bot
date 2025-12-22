@@ -26,7 +26,6 @@ MONTHS_RU = {
     5: "мая", 6: "июня", 7: "июля", 8: "августа",
     9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
 }
-
 WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
@@ -46,31 +45,39 @@ async def answer_callback(callback_query_id: str):
     await tg_post("answerCallbackQuery", {"callback_query_id": callback_query_id})
 
 
-def build_calendar(offset_days: int = 0) -> dict:
+def build_calendar(payload: dict, offset_days: int = 0) -> dict:
     """
-    Календарь на 7 дней кнопками + навигация назад/вперед.
-    offset_days = 0 -> начиная с сегодня
+    Календарь на 7 дней кнопками.
+    ВАЖНО: service_id и master_id передаем в callback кнопки даты,
+    поэтому ничего не "собьётся" даже без базы.
     """
     start_date = datetime.now().date() + timedelta(days=offset_days)
 
-    buttons = []
+    service_id = payload.get("service_id")
+    master_id = payload.get("master_id")
+
+    kb = {"inline_keyboard": []}
+
     for i in range(7):
         d = start_date + timedelta(days=i)
         wd = WEEKDAYS_RU[d.weekday()]
         text = f"{wd} {d.day} {MONTHS_RU[d.month]}"
-        buttons.append((text, f"date:{d.isoformat()}"))
 
-    nav = []
+        # формат: date:YYYY-MM-DD:svc=ID:mst=ID
+        cb = f"date:{d.isoformat()}:svc={service_id}:mst={master_id}"
+        kb["inline_keyboard"].append([{"text": text, "callback_data": cb}])
+
+    # Навигация
     if offset_days > 0:
-        nav.append(("⬅️ назад", f"cal:{offset_days - 7}"))
-    nav.append(("➡️ вперед", f"cal:{offset_days + 7}"))
+        kb["inline_keyboard"].append([
+            {"text": "⬅️ назад", "callback_data": f"cal:{offset_days - 7}"},
+            {"text": "➡️ вперед", "callback_data": f"cal:{offset_days + 7}"},
+        ])
+    else:
+        kb["inline_keyboard"].append([
+            {"text": "➡️ вперед", "callback_data": f"cal:{offset_days + 7}"},
+        ])
 
-    kb = {"inline_keyboard": []}
-    for t, cb in buttons:
-        kb["inline_keyboard"].append([{"text": t, "callback_data": cb}])
-    kb["inline_keyboard"].append([{"text": nav[0][0], "callback_data": nav[0][1]}] if len(nav) == 1 else
-                                 [{"text": nav[0][0], "callback_data": nav[0][1]},
-                                  {"text": nav[1][0], "callback_data": nav[1][1]}])
     return kb
 
 
@@ -91,37 +98,43 @@ async def telegram_webhook(request: Request):
         chat_id = cq["message"]["chat"]["id"]
         await answer_callback(cq["id"])
 
-        # навигация календаря
+        # перелистывание календаря
         if data.startswith("cal:"):
             offset = int(data.split(":")[1])
             step, payload = await get_state(chat_id)
             payload["cal_offset"] = offset
             await set_state(chat_id, step, payload)
-            await send_message(chat_id, "Выберите дату:", build_calendar(offset))
+
+            # календарь строим из payload (там service_id и master_id)
+            await send_message(chat_id, "Выберите дату:", build_calendar(payload, offset))
             return JSONResponse(content={"ok": True})
 
         # выбор даты
         if data.startswith("date:"):
-            date_str = data.split("date:")[1]
+            # формат: date:YYYY-MM-DD:svc=ID:mst=ID
+            parts = data.split(":")
+            date_str = parts[1]
+            service_id = int(parts[2].split("=")[1])
+            master_id = int(parts[3].split("=")[1])
+
             step, payload = await get_state(chat_id)
 
-            service_id = payload.get("service_id")
-            master_id = payload.get("master_id")
-
-            if not service_id or not master_id:
-                await send_message(chat_id, "Что-то сбилось. Напишите /start и попробуйте снова.")
-                return JSONResponse(content={"ok": True})
-
+            # гарантируем payload (даже если "память" лагнула)
+            payload["service_id"] = service_id
+            payload["master_id"] = master_id
             payload["date"] = date_str
+
             await set_state(chat_id, "choose_time", payload)
 
             times = await get_available_times(service_id=service_id, staff_id=master_id, date_str=date_str)
-
             if not times:
-                await send_message(chat_id, "На эту дату нет свободного времени 😔\nВыберите другую дату:", build_calendar(payload.get("cal_offset", 0)))
+                await send_message(
+                    chat_id,
+                    "На эту дату нет свободного времени 😔\nВыберите другую дату:",
+                    build_calendar(payload, payload.get("cal_offset", 0)),
+                )
                 return JSONResponse(content={"ok": True})
 
-            # показываем время кнопками (по 2 в ряд)
             time_buttons = [(t, f"time:{t}") for t in times[:40]]
             await send_message(chat_id, "Выберите время:", inline_keyboard(time_buttons, row=2))
             return JSONResponse(content={"ok": True})
@@ -139,7 +152,7 @@ async def telegram_webhook(request: Request):
                 f"Отлично ✅\n"
                 f"Дата: {payload.get('date')}\n"
                 f"Время: {time_str}\n\n"
-                f"Следующий шаг — подтвердить запись и (если нужно) попросить телефон/имя."
+                f"Следующий шаг — подтвердить запись (и при необходимости запросить имя/телефон)."
             )
             return JSONResponse(content={"ok": True})
 
@@ -169,13 +182,13 @@ async def telegram_webhook(request: Request):
                 await send_message(chat_id, "По этой услуге нет мастеров 😔")
                 return JSONResponse(content={"ok": True})
 
-            # masters может быть разного формата; приводим к name/id
             normalized = []
             for m in masters:
-                mid = m.get("id") if isinstance(m, dict) else None
-                mname = m.get("name") if isinstance(m, dict) else None
-                if mid and mname:
-                    normalized.append((mname, f"mst:{mid}"))
+                if isinstance(m, dict):
+                    mid = m.get("id")
+                    mname = m.get("name")
+                    if mid and mname:
+                        normalized.append((mname, f"mst:{mid}"))
 
             if not normalized:
                 await send_message(chat_id, "Не смогла прочитать список мастеров 😔")
@@ -188,11 +201,12 @@ async def telegram_webhook(request: Request):
         if data.startswith("mst:"):
             master_id = int(data.split(":")[1])
             step, payload = await get_state(chat_id)
+
             payload["master_id"] = master_id
             payload["cal_offset"] = 0
             await set_state(chat_id, "choose_date", payload)
 
-            await send_message(chat_id, "Мастер выбран ✅\n\nВыберите дату:", build_calendar(0))
+            await send_message(chat_id, "Мастер выбран ✅\n\nВыберите дату:", build_calendar(payload, 0))
             return JSONResponse(content={"ok": True})
 
         await send_message(chat_id, "Не поняла действие. Напишите /start")
