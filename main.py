@@ -789,4 +789,3 @@ chat_id: <code>{chat_id}</code>
         meta="DEFAULT_REPLY",
     )
     return JSONResponse(content={"ok": True})
-
