@@ -26,6 +26,58 @@ app = FastAPI()
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 MEMORY_FILE = "dialog_memory.json"
 
+# ------------------- НАСТРОЙКИ УВЕДОМЛЕНИЙ -------------------
+# ADMIN_CHAT_ID: чат/группа для дублей. Если это группа, обычно id начинается с -100...
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "5616469242"))
+ONLINE_BOOKING_URL = os.getenv("ONLINE_BOOKING_URL", "https://n561655.yclients.com/")
+BOOKING_ENABLED = os.getenv("BOOKING_ENABLED", "false").lower() == "true"
+
+def is_admin_chat(chat_id: int) -> bool:
+    return ADMIN_CHAT_ID != 0 and chat_id == ADMIN_CHAT_ID
+
+def client_label(user: dict, data: dict | None = None) -> str:
+    data = data or {}
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    name = (first + " " + last).strip() or "Без имени"
+    uname = user.get("username")
+    tg_id = user.get("id")
+    phone = data.get("phone")
+    parts = [name]
+    if uname:
+        parts.append(f"@{uname}")
+    if tg_id:
+        parts.append(f"tg_id={tg_id}")
+    if phone:
+        parts.append(f"тел={phone}")
+    return " | ".join(parts)
+
+async def notify_admin(text: str):
+    if ADMIN_CHAT_ID == 0:
+        return
+    await tg_post("sendMessage", {
+        "chat_id": ADMIN_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    })
+
+async def send_client(chat_id: int, text: str, reply_markup: dict | None = None, meta: str | None = None):
+    res = await send_message(chat_id, text, reply_markup)
+    if not is_admin_chat(chat_id):
+        ok = bool(res.get("ok"))
+        status = "ОТПРАВЛЕНО" if ok else "ОШИБКА"
+        meta_txt = f"<b>{meta}</b>\n" if meta else ""
+        await notify_admin(
+            f"""{meta_txt}<b>➡️ Исходящее клиенту</b>
+chat_id: <code>{chat_id}</code>
+Статус: <b>{status}</b>
+
+{text}"""
+        )
+    return res
+
+
 # чтобы не слать одно и то же 3 раза при повторных callback
 PROCESSED_CALLBACKS_TTL_SEC = 120
 processed_callbacks = {}  # callback_id -> unix_ts
@@ -74,7 +126,7 @@ async def tg_post(method: str, payload: dict):
                 return {"ok": False, "raw": text}
 
 async def send_message(chat_id: int, text: str, reply_markup: dict | None = None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return await tg_post("sendMessage", payload)
@@ -186,48 +238,210 @@ async def get_free_times_for_date(staff_id: int, service_id: int, day_iso: str):
     return []
 
 # ------------------- UI: меню/шаги -------------------
+def confirm_kb(appt_key: str):
+    return inline_keyboard([
+        [{"text": "✅ Подтверждаю", "callback_data": f"appt:confirm:{appt_key}"}],
+        [{"text": "🔁 Перенести", "callback_data": f"appt:reschedule:{appt_key}"}],
+        [{"text": "❌ Отменить", "callback_data": f"appt:cancel:{appt_key}"}],
+    ])
+
 def main_menu():
     return inline_keyboard([
-        [{"text": "✅ Записаться на процедуру", "callback_data": "menu:book"}],
-        [{"text": "📋 Посмотреть услуги", "callback_data": "menu:services"}],
+        [{"text": "📅 Онлайн-запись", "url": ONLINE_BOOKING_URL}],
+        [{"text": "💬 Написать администратору", "callback_data": "menu:to_admin"}],
+        [{"text": "📱 Привязать номер", "callback_data": "menu:link_phone"}],
     ])
 
 async def show_welcome(chat_id: int):
-    text = (
-        "Здравствуйте 🌸\n"
-        "Я — виртуальный администратор студии <b>KUTIKULA</b>.\n\n"
-        "Чем могу помочь?"
-    )
-    await send_message(chat_id, text, main_menu())
+    text = """Здравствуйте 🌸
+Я — виртуальный администратор студии KUTIKULA.
+
+Я могу присылать вам напоминание о Вашей записи. За три дня, за один день и за пару часов до записи.
+
+Изменить запись вы сможете с помощью онлайн записи перейдя по ссылке:
+https://n561655.yclients.com/"""
+    await send_client(chat_id, text, main_menu(), meta="WELCOME")
     reset_state(chat_id)
 
-# ------------------- ОБРАБОТЧИКИ -------------------
+
+
+# ------------------- ШАБЛОНЫ СООБЩЕНИЙ -------------------
+# Примечание: форматирование — Telegram Markdown (звёздочки *жирный*, подчёркивания _курсив_)
+
+TPL_ON_BOOKING = """👋 Вы записaны в 
+Studio KUTIKULA 
+
+▫️*{service}*
+*к {master}*
+*Предварительная cтoимoсть: {price}*
+*Дата и время визита: {dt}*
+
+Aдрес cтудии 
+ул. Фасаднaя, д. 21
+
+Вхoд сo стороны улицы Фacaдная
+Яндeкc.Карты
+https://kutikula116.clients.site 
+
+Ждём Bаc!"""
+
+TPL_REMINDER_3D = """Дoбрый вeчер! 
+Hа cвязи Nail Studio KUTIKULA
+
+Hапоминaем, чтo Вы записaны 
+*{day_label}* 
+*нa {time_hm}* 
+▫️*{service}*
+
+Aдрec cтyдии:
+yл. Фacаднaя, 21
+_вxoд cо стoрoны yл. Фaсадной_
+
+Cсылка на Яндекc.Kaрты:
+https://kutikula116.clients.site
+
+*Пожалyйcтa, отправьтe:*
+*«+» — если пoдтверждаeте визит*
+*«–» — eсли xотитe oтмeнить или перeнеcти запись*"""
+
+
+# Напоминание за 1 день — используем тот же шаблон (при необходимости можно заменить текстом "завтра")
+TPL_REMINDER_1D = TPL_REMINDER_3D
+
+TPL_CANCELLED = """Вaша зaпиcь
+▫️*{service}*
+нa *{dt}* oтмeнeнa.
+
+Вы мoжeте выбрать удобнoе для себя врeмя, вocпoльзовaвшиcь онлaйн-зaписью пeрeйдя по ccылкe:
+*https://n561655.yclients.com/*"""
+
+TPL_REMINDER_2H = """⏳ Ждём Baс в *{time_hm}*
+
+*Пoжaлyйстa, отпрaвьтe:*
+*«+» — еcли пoдтверждaетe визит*
+*«–» — ecли xотитe oтменить или пeрeнеcти зaпись*"""
+
+RU_WEEK_FULL = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+def fmt_day_full(d: date) -> str:
+    return f"{RU_WEEK_FULL[d.weekday()]} {d.day} {RU_MONTH[d.month]}"
+
+def hm_from_dt(dt_str: str) -> str:
+    # ожидаем "YYYY-MM-DD HH:MM" или "HH:MM"
+    if not dt_str:
+        return ""
+    m = re.search(r"(\d{2}:\d{2})", dt_str)
+    return m.group(1) if m else dt_str
+
+def ymd_from_dt(dt_str: str) -> str:
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", dt_str)
+    return m.group(1) if m else ""
+
+async def send_reminder_3d(chat_id: int, appt_key: str, service: str, dt_str: str):
+    ymd = ymd_from_dt(dt_str)
+    d = datetime.strptime(ymd, "%Y-%m-%d").date() if ymd else date.today()
+    msg = TPL_REMINDER_3D.format(
+        day_label=fmt_day_full(d),
+        time_hm=hm_from_dt(dt_str),
+        service=service,
+    )
+    # ждём от клиента + / -
+    st = get_state(chat_id)
+    data = st.get("data", {})
+    data["await_appt_key"] = appt_key
+    data["await_appt_service"] = service
+    data["await_appt_dt"] = dt_str
+    set_state(chat_id, "await_plusminus", data)
+    await send_client(chat_id, msg, meta="REMINDER_3D")
+
+
+async def send_reminder_1d(chat_id: int, appt_key: str, service: str, dt_str: str):
+    ymd = ymd_from_dt(dt_str)
+    d = datetime.strptime(ymd, "%Y-%m-%d").date() if ymd else date.today()
+    msg = TPL_REMINDER_1D.format(
+        day_label=fmt_day_full(d),
+        time_hm=hm_from_dt(dt_str),
+        service=service,
+    )
+    st = get_state(chat_id)
+    data = st.get("data", {})
+    data["await_appt_key"] = appt_key
+    data["await_appt_service"] = service
+    data["await_appt_dt"] = dt_str
+    set_state(chat_id, "await_plusminus", data)
+    await send_client(chat_id, msg, meta="REMINDER_1D")
+
+async def send_reminder_2h(chat_id: int, appt_key: str, dt_str: str):
+    msg = TPL_REMINDER_2H.format(time_hm=hm_from_dt(dt_str))
+    st = get_state(chat_id)
+    data = st.get("data", {})
+    data["await_appt_key"] = appt_key
+    data["await_appt_dt"] = dt_str
+    set_state(chat_id, "await_plusminus", data)
+    await send_client(chat_id, msg, meta="REMINDER_2H")
+def contact_keyboard():
+    return {
+        "keyboard": [[{"text": "📱 Отправить номер", "request_contact": True}]],
+        "resize_keyboard": True,
+        "one_time_keyboard": True,
+    }
+
+
 async def handle_menu(chat_id: int, action: str):
+    if action == "link_phone":
+        st = get_state(chat_id)
+        set_state(chat_id, "await_contact", st.get("data", {}))
+        await send_client(
+            chat_id,
+            "Нажмите кнопку ниже, чтобы отправить номер телефона (нужно для напоминаний о записи).",
+            reply_markup=contact_keyboard(),
+            meta="LINK_PHONE",
+        )
+        return
+
+    if action == "to_admin":
+        st = get_state(chat_id)
+        set_state(chat_id, "chat_to_admin", st.get("data", {}))
+        await send_client(chat_id, "Напишите сообщение — я перешлю администратору.", meta="TO_ADMIN")
+        return
+
+    # Старый функционал записи оставлен на потом и отключён по умолчанию
+    if action in ("book", "services") and not BOOKING_ENABLED:
+        await send_client(
+            chat_id,
+            f"Запись через бота отключена. Используйте онлайн-запись: {ONLINE_BOOKING_URL}",
+            main_menu(),
+            meta="BOOKING_DISABLED",
+        )
+        return
+
+    # Если вы включите BOOKING_ENABLED=true — ниже остаётся ваш старый сценарий
     if action == "book":
         cats = await get_categories()
         if not cats:
-            await send_message(chat_id, "❌ Не получилось получить категории из YCLIENTS.")
+            await send_client(chat_id, "❌ Не получилось получить категории из YCLIENTS.", meta="BOOKING_ERR")
             return
 
         rows = []
         for c in cats:
             rows.append([{"text": c["title"], "callback_data": f"cat:{c['id']}"}])
 
-        await send_message(chat_id, "Выберите категорию услуг:", inline_keyboard(rows))
+        await send_client(chat_id, "Выберите категорию услуг:", inline_keyboard(rows), meta="BOOKING_CAT")
         set_state(chat_id, "choosing_category", {})
         return
 
     if action == "services":
         cats = await get_categories()
         if not cats:
-            await send_message(chat_id, "❌ Не получилось получить категории из YCLIENTS.")
+            await send_client(chat_id, "❌ Не получилось получить категории из YCLIENTS.", meta="SERVICES_ERR")
             return
 
         msg = "Категории:\n\n" + "\n".join([f"• {c['title']}" for c in cats])
-        await send_message(chat_id, msg)
+        await send_client(chat_id, msg, meta="SERVICES_LIST")
         return
 
-    await send_message(chat_id, "Не поняла команду. Напишите /start")
+    await send_client(chat_id, "Не поняла команду. Напишите /start", meta="UNKNOWN_MENU")
+
 
 async def handle_category(chat_id: int, category_id: int):
     services = await get_services_by_category(category_id)
@@ -336,10 +550,35 @@ async def telegram_webhook(request: Request):
         await answer_callback(cq_id)
 
         try:
+            # appt actions (подтверждение/перенос/отмена)
+            if data.startswith("appt:"):
+                _, action, appt_key = data.split(":", 2)
+                user = cq.get("from", {})
+                st = get_state(chat_id)
+                await notify_admin(
+                    f"""<b>🧷 Действие по записи</b>
+Клиент: {client_label(user, st.get('data', {}))}
+Действие: <b>{action}</b>
+appt_key: <code>{appt_key}</code>
+chat_id: <code>{chat_id}</code>"""
+                )
+                if action == "confirm":
+                    await send_client(chat_id, "Отлично, запись подтверждена. Ждём вас!", main_menu(), meta="APPT_CONFIRM")
+                elif action == "reschedule":
+                    await send_client(chat_id, f"Чтобы перенести запись, выберите удобное время онлайн: {ONLINE_BOOKING_URL}", main_menu(), meta="APPT_RESCHEDULE")
+                else:
+                    await send_client(chat_id, "Запрос на отмену принят. Администратор свяжется, если нужно уточнение.", main_menu(), meta="APPT_CANCEL")
+                return JSONResponse(content={"ok": True})
+
             # menu:
             if data.startswith("menu:"):
                 action = data.split(":")[1]
                 await handle_menu(chat_id, action)
+                return JSONResponse(content={"ok": True})
+
+            # если запись отключена — блокируем старые callback-сценарии записи
+            if (not BOOKING_ENABLED) and data.startswith(("cat:", "svc:", "mst:", "cal:", "date:", "time:")):
+                await send_client(chat_id, f"Запись через бота отключена. Используйте онлайн-запись: {ONLINE_BOOKING_URL}", main_menu(), meta="BOOKING_DISABLED")
                 return JSONResponse(content={"ok": True})
 
             # cat:
@@ -406,16 +645,52 @@ async def telegram_webhook(request: Request):
             await send_message(chat_id, "Что-то сбилось. Напишите /start и попробуйте снова.")
             return JSONResponse(content={"ok": True})
 
-    # 2) обычные сообщения (текст)
+    # 2) обычные сообщения (текст/контакт)
     message = update.get("message")
     if not message:
         return JSONResponse(content={"ok": True})
 
     chat_id = message["chat"]["id"]
+
+    # чтобы не зациклиться: сообщения из админ-чата не пересылаем обратно админу
+    if is_admin_chat(chat_id):
+        return JSONResponse(content={"ok": True})
+
+    user = message.get("from", {})
     text = (message.get("text") or "").strip()
 
-    # команды старта
-    if text in ("/start", "start", "привет", "Привет", "Здравствуйте", "здравствуйте"):
+    # /chatid — для настройки
+    if text == "/chatid":
+        await send_message(chat_id, f"chat_id = {chat_id}")
+        return JSONResponse(content={"ok": True})
+
+    # контакт (кнопка «Отправить номер»)
+    contact = message.get("contact")
+    if contact:
+        phone_raw = contact.get("phone_number", "")
+        phone = normalize_phone(phone_raw) or phone_raw
+
+        st = get_state(chat_id)
+        data = st.get("data", {})
+        data["phone"] = phone
+        set_state(chat_id, "idle", data)
+
+        await notify_admin(
+            f"""<b>📱 Клиент отправил контакт</b>
+Клиент: {client_label(user, data)}
+chat_id: <code>{chat_id}</code>
+Телефон: <code>{phone}</code>"""
+        )
+        await send_client(chat_id, "Спасибо! Номер сохранён.", main_menu(), meta="CONTACT_SAVED")
+        return JSONResponse(content={"ok": True})
+
+    # команды старта / приветствия
+    text_l = text.lower()
+    greetings = {
+        "start", "привет", "здравствуйте", "добрый день", "добрый вечер", "доброе утро",
+        "hi", "hello",
+    }
+    if text.startswith("/start") or text_l in greetings or text_l.startswith(("привет", "здравств", "добрый ")):
         await show_welcome(chat_id)
         return JSONResponse(content={"ok": True})
 
@@ -423,55 +698,95 @@ async def telegram_webhook(request: Request):
     step = st.get("step", "idle")
     data = st.get("data", {})
 
-    try:
-        if step == "await_name":
-            name = text
-            if len(name) < 2:
-                await send_message(chat_id, "Напишите имя чуть понятнее (минимум 2 буквы).")
-                return JSONResponse(content={"ok": True})
-            data["name"] = name
-            set_state(chat_id, "await_phone", data)
-            await send_message(chat_id, "Теперь напишите номер телефона (можно в любом формате).")
-            return JSONResponse(content={"ok": True})
+    # входящее сообщение — всегда дублируем админу (если не пустое)
+    if text:
+        await notify_admin(
+            f"""<b>📩 Входящее от клиента</b>
+Клиент: {client_label(user, data)}
+chat_id: <code>{chat_id}</code>
 
-        if step == "await_phone":
-            phone = normalize_phone(text)
-            if not phone:
-                await send_message(chat_id, "Не вижу корректный номер. Пример: +7 917 123-45-67")
-                return JSONResponse(content={"ok": True})
+{text}"""
+        )
 
-            name = data["name"]
-            service_id = int(data["service_id"])
-            master_id = int(data["master_id"])
-            dt_str = data["datetime"]
+    # режим «написать администратору»
+    if step == "chat_to_admin":
+        await send_client(
+            chat_id,
+            "Сообщение передано администратору. Ответим вам в этом чате.",
+            main_menu(),
+            meta="MSG_TO_ADMIN_OK",
+        )
+        set_state(chat_id, "idle", data)
+        return JSONResponse(content={"ok": True})
 
-            # создаем запись в YCLIENTS
-            booking = await create_booking(
-                name=name,
-                last_name="",
-                phone=phone,
-                service_id=service_id,
-                master_id=master_id,
-                time=dt_str,
+    
+    # ожидание подтверждения визита через "+" / "-" (после напоминаний)
+    if step == "await_plusminus" and text:
+        t = text.strip()
+        if t in ("+", "＋"):
+            appt_key = data.get("await_appt_key")
+            appt_dt = data.get("await_appt_dt")
+            appt_service = data.get("await_appt_service")
+            await notify_admin(
+                f"""<b>✅ Клиент подтвердил визит</b>
+Клиент: {client_label(user, data)}
+chat_id: <code>{chat_id}</code>
+appt_key: <code>{appt_key}</code>
+Услуга: {appt_service or "-"}
+Дата/время: {appt_dt or "-"}"""
             )
-
-            if booking:
-                await send_message(chat_id, f"✅ Готово! Вы записаны на <b>{dt_str}</b>.\nЕсли нужно перенести — напишите мне.")
-                reset_state(chat_id)
-            else:
-                await send_message(chat_id, "❌ Не получилось создать запись. Попробуйте выбрать другое время или напишите /start.")
-                reset_state(chat_id)
-
+            await send_client(chat_id, "Спасибо! Визит подтверждён.", main_menu(), meta="PLUS_CONFIRM")
+            # очищаем ожидание
+            data.pop("await_appt_key", None)
+            data.pop("await_appt_dt", None)
+            data.pop("await_appt_service", None)
+            set_state(chat_id, "idle", data)
             return JSONResponse(content={"ok": True})
 
-        # если не в процессе — мягко возвращаем в меню
-        await send_message(chat_id, "Напишите /start, чтобы начать запись.")
+        if t in ("-", "–", "—"):
+            appt_key = data.get("await_appt_key")
+            appt_dt = data.get("await_appt_dt")
+            appt_service = data.get("await_appt_service")
+            await notify_admin(
+                f"""<b>❌ Клиент просит отменить/перенести</b>
+Клиент: {client_label(user, data)}
+chat_id: <code>{chat_id}</code>
+appt_key: <code>{appt_key}</code>
+Услуга: {appt_service or "-"}
+Дата/время: {appt_dt or "-"}"""
+            )
+            await send_client(
+                chat_id,
+                f"Принято. Отменить или перенести запись можно через онлайн-запись:\n{ONLINE_BOOKING_URL}",
+                main_menu(),
+                meta="MINUS_CANCEL_RESCHEDULE",
+            )
+            data.pop("await_appt_key", None)
+            data.pop("await_appt_dt", None)
+            data.pop("await_appt_service", None)
+            set_state(chat_id, "idle", data)
+            return JSONResponse(content={"ok": True})
+
+# если пользователь прислал номер текстом
+    ph = normalize_phone(text)
+    if ph:
+        data["phone"] = ph
+        set_state(chat_id, "idle", data)
+        await notify_admin(
+            f"""<b>📱 Клиент прислал номер текстом</b>
+Клиент: {client_label(user, data)}
+chat_id: <code>{chat_id}</code>
+Телефон: <code>{ph}</code>"""
+        )
+        await send_client(chat_id, "Спасибо! Номер сохранён.", main_menu(), meta="PHONE_SAVED_TEXT")
         return JSONResponse(content={"ok": True})
 
-    except Exception as e:
-        logger.exception(e)
-        await send_message(chat_id, "Что-то сбилось. Напишите /start и попробуйте снова.")
-        reset_state(chat_id)
-        return JSONResponse(content={"ok": True})
-    await send_message(chat_id, "Напишите /start, чтобы начать запись 🌸")
+    # по умолчанию
+    await send_client(
+        chat_id,
+        "Принято.\n\nЧтобы записаться — нажмите «Онлайн-запись».\nЕсли нужен администратор — нажмите «Написать администратору».",
+        main_menu(),
+        meta="DEFAULT_REPLY",
+    )
     return JSONResponse(content={"ok": True})
+
