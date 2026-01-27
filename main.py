@@ -3,6 +3,32 @@ import json
 import re
 import logging
 import aiohttp
+import html
+from datetime import datetime
+
+def safe_str(x) -> str:
+    return "" if x is None else str(x)
+
+def escape_html(s: str) -> str:
+    return html.escape(s or "")
+
+def try_parse_dt(s: str):
+    if not s:
+        return None
+    s = str(s).strip()
+    try:
+        # ISO, иногда с Z
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        pass
+    # частые форматы
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
 from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
