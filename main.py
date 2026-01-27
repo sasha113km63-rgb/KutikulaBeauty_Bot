@@ -4,21 +4,22 @@ import re
 import logging
 import aiohttp
 import html
-from datetime import datetime, date, timedelta
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from config import TELEGRAM_TOKEN, YCLIENTS_COMPANY_ID
 from yclients_api import (
-    # Эти импорты оставлены для совместимости со старым сценарием записи (по умолчанию отключён)
+    # оставлено для совместимости (старый сценарий записи)
     get_categories,
     get_services_by_category,
     get_masters_for_service,
     create_booking,
-    # Для запросов к YCLIENTS / заголовков
+    # для запросов к YCLIENTS
     get_headers,
     BASE_URL,
+    get_record_by_id,
 )
 
 # ------------------- УТИЛИТЫ -------------------
@@ -29,7 +30,7 @@ def escape_html(s: str) -> str:
     return html.escape(s or "")
 
 def try_parse_dt(s: str):
-    """Пытаемся распарсить дату/время из разных форматов YCLIENTS."""
+    """Пытаемся распарсить дату/время из разных форматов (в т.ч. '2026-01-27 15:30:00')."""
     if not s:
         return None
     s = str(s).strip()
@@ -58,6 +59,15 @@ def normalize_phone(text: str) -> str | None:
     if len(digits) != 11:
         return None
     return "+" + digits
+
+def md_sanitize(s: str) -> str:
+    """Мини-санитайзер под Telegram Markdown (legacy), чтобы динамические поля не ломали разметку."""
+    if not s:
+        return ""
+    # экранируем самые частые "ломающие" символы
+    for ch in ["*", "_", "`", "[", "]"]:
+        s = s.replace(ch, f"\\{ch}")
+    return s
 
 # ------------------- ЛОГИ/APP -------------------
 logging.basicConfig(level=logging.INFO)
@@ -236,62 +246,101 @@ async def send_chatid(chat_id: int):
 
 # ------------------- YCLIENTS WEBHOOK -------------------
 def extract_from_yclients_webhook(payload: dict) -> dict:
+    """
+    YCLIENTS присылает часто такую форму:
+    {"company_id":..., "resource":"record", "resource_id":..., "status":"create|update|delete", "data":{...}}
+    Внутри payload["data"] обычно НЕТ телефона клиента, поэтому при отсутствии телефона мы будем
+    дополнительно запрашивать запись по record_id через API.
+    """
     d = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
-    record_id = d.get("id") or d.get("record_id") or d.get("appointment_id") or d.get("event_id")
+    # статус
+    status = safe_str(payload.get("status") or d.get("status") or "").lower().strip()
+
+    # record_id может быть в resource_id, либо в data.id
+    record_id = payload.get("resource_id") or d.get("id") or d.get("record_id") or d.get("appointment_id") or d.get("event_id")
     record_id = safe_str(record_id)
 
+    # company_id может отличаться от env — берём из payload если есть
+    company_id = payload.get("company_id") or d.get("company_id") or YCLIENTS_COMPANY_ID
+    try:
+        company_id = int(company_id)
+    except Exception:
+        company_id = int(YCLIENTS_COMPANY_ID)
+
+    # телефон (часто отсутствует)
     phone_raw = None
     if isinstance(d.get("client"), dict):
         phone_raw = d["client"].get("phone") or d["client"].get("phone_number")
     phone_raw = phone_raw or d.get("phone") or d.get("client_phone")
     phone = normalize_phone(safe_str(phone_raw)) or safe_str(phone_raw)
 
-    start_str = d.get("start_at") or d.get("datetime") or d.get("date_time") or d.get("seance_date")
+    # дата/время в webhook чаще приходит как "date"
+    start_str = d.get("start_at") or d.get("datetime") or d.get("date_time") or d.get("seance_date") or d.get("date")
     start_dt = try_parse_dt(start_str) if start_str else None
 
-    service = "УСЛУГА"
-    master = ""
+    return {
+        "status": status,
+        "record_id": record_id,
+        "company_id": company_id,
+        "phone": phone,
+        "start_dt": start_dt,
+        "raw": payload,
+    }
+
+def extract_from_record_detail(rec: dict) -> dict:
+    """Вынимаем из полной записи телефон/услугу/мастера/стоимость/дату."""
+    phone_raw = None
+    if isinstance(rec.get("client"), dict):
+        phone_raw = rec["client"].get("phone") or rec["client"].get("phone_number")
+    phone_raw = phone_raw or rec.get("client_phone") or rec.get("phone")
+    phone = normalize_phone(safe_str(phone_raw)) or safe_str(phone_raw)
+
+    # datetime
+    start_str = rec.get("datetime") or rec.get("date") or rec.get("start_at")
+    start_dt = try_parse_dt(start_str) if start_str else None
+
+    # service/title
+    service = ""
     price = ""
 
-    if isinstance(d.get("services"), list) and d["services"]:
-        s0 = d["services"][0]
+    if isinstance(rec.get("services"), list) and rec["services"]:
+        s0 = rec["services"][0]
         if isinstance(s0, dict):
-            service = s0.get("title") or s0.get("name") or service
-            if s0.get("price"):
+            service = s0.get("title") or s0.get("name") or ""
+            if s0.get("price") is not None:
                 price = safe_str(s0.get("price"))
 
-    if isinstance(d.get("service"), dict):
-        service = d["service"].get("title") or d["service"].get("name") or service
-        if d["service"].get("price"):
-            price = safe_str(d["service"].get("price"))
-    elif isinstance(d.get("service"), str):
-        service = d.get("service") or service
-
-    if isinstance(d.get("staff"), dict):
-        master = d["staff"].get("name") or master
-    if isinstance(d.get("master"), dict):
-        master = d["master"].get("name") or master
-    elif isinstance(d.get("master"), str):
-        master = d.get("master") or master
+    if not service and isinstance(rec.get("service"), dict):
+        service = rec["service"].get("title") or rec["service"].get("name") or service
+        if not price and rec["service"].get("price") is not None:
+            price = safe_str(rec["service"].get("price"))
 
     if not price:
-        price = safe_str(d.get("price") or d.get("cost") or "")
+        price = safe_str(rec.get("price") or rec.get("cost") or rec.get("amount") or "")
+
+    master = ""
+    if isinstance(rec.get("staff"), dict):
+        master = rec["staff"].get("name") or master
+    if isinstance(rec.get("master"), dict):
+        master = rec["master"].get("name") or master
 
     return {
-        "record_id": record_id,
         "phone": phone,
         "start_dt": start_dt,
         "service": safe_str(service),
         "master": safe_str(master),
         "price": safe_str(price),
-        "raw": payload,
     }
 
 @app.post("/yclients-webhook")
 async def yclients_webhook(request: Request):
-    secret = request.query_params.get("secret", "")
-    if YCLIENTS_WEBHOOK_SECRET and secret != YCLIENTS_WEBHOOK_SECRET:
+    # секрет можно передавать query или заголовком (на всякий случай)
+    secret_q = request.query_params.get("secret", "")
+    secret_h = request.headers.get("X-Webhook-Secret", "")
+    incoming_secret = secret_q or secret_h
+
+    if YCLIENTS_WEBHOOK_SECRET and incoming_secret != YCLIENTS_WEBHOOK_SECRET:
         return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden"})
 
     payload = await request.json()
@@ -299,50 +348,77 @@ async def yclients_webhook(request: Request):
 
     f = extract_from_yclients_webhook(payload)
 
-    if not f["phone"]:
+    # нас интересует отбивка в момент создания записи
+    create_statuses = {"create", "created", "new"}
+    if f["status"] and (f["status"] not in create_statuses):
+        # игнорим update/delete чтобы не слать лишнее
+        return {"ok": True}
+
+    record_id = f["record_id"]
+    company_id = f["company_id"]
+
+    if record_id and was_sent(record_id, "created"):
+        return {"ok": True}
+
+    # если нет телефона в webhook — достаем полную запись по id
+    details = {"phone": f["phone"], "start_dt": f["start_dt"], "service": "", "master": "", "price": ""}
+    if not details["phone"]:
+        rec = await get_record_by_id(company_id, record_id)
+        if rec:
+            det = extract_from_record_detail(rec)
+            details.update(det)
+
+    if not details["phone"]:
         await notify_admin(
-            f"<b>YCLIENTS webhook</b><br/>Не нашла телефон в payload.<br/>"
+            f"<b>YCLIENTS webhook</b><br/>"
+            f"record_id: <code>{escape_html(record_id)}</code><br/>"
+            f"Не нашла телефон (ни в webhook, ни в деталях записи).<br/>"
             f"<pre>{escape_html(json.dumps(payload, ensure_ascii=False)[:1500])}</pre>"
         )
         return {"ok": True}
 
     phone_map = phone_to_chat_map()
-    chat_id = phone_map.get(str(f["phone"]))
+    chat_id = phone_map.get(str(details["phone"]))
 
     if not chat_id:
         await notify_admin(
-            f"<b>Новая запись (YCLIENTS)</b><br/>Телефон: <code>{escape_html(f['phone'])}</code><br/>"
+            f"<b>Новая запись (YCLIENTS)</b><br/>"
+            f"record_id: <code>{escape_html(record_id)}</code><br/>"
+            f"Телефон: <code>{escape_html(details['phone'])}</code><br/>"
             f"Клиент не привязан к боту (не отправлял номер)."
         )
         return {"ok": True}
 
-    if f["record_id"] and was_sent(f["record_id"], "created"):
-        return {"ok": True}
-
-    if f["start_dt"]:
-        dt_line = f"Дата и время визита: {f['start_dt'].strftime('%d.%m.%Y %H:%M')}"
+    # формируем текст
+    if details["start_dt"]:
+        dt_line = f"Дата и время визита: {details['start_dt'].strftime('%d.%m.%Y %H:%M')}"
     else:
         dt_line = "Дата и время визита: уточните у администратора"
 
-    price_txt = f"Предварительная cтoимoсть: {f['price']}" if f["price"] else "Предварительная cтoимoсть: —"
-    master_txt = f["master"] if f["master"] else "*к какому Mастеру*"
+    # динамические поля санитайзим, чтобы не ломали Markdown
+    service_txt = md_sanitize(details["service"] or "УСЛУГА")
+    master_name = md_sanitize(details["master"]) if details["master"] else ""
+    master_txt = master_name if master_name else "*к какому Mастеру*"
+
+    price_val = md_sanitize(details["price"]) if details["price"] else ""
+    price_txt = f"Предварительная cтoимoсть: {price_val}" if price_val else "Предварительная cтoимoсть: —"
 
     msg = tpl_booking_created(
-        service=f["service"] or "УСЛУГА",
+        service=service_txt,
         master=master_txt,
         price=price_txt,
         dt_str=dt_line,
     )
     await send_client(chat_id, msg, meta="BOOKING_CREATED_WEBHOOK")
 
-    if f["record_id"]:
-        mark_sent(f["record_id"], "created", {"src": "webhook", "ts": datetime.utcnow().isoformat()})
+    if record_id:
+        mark_sent(record_id, "created", {"src": "webhook", "ts": datetime.utcnow().isoformat(), "phone": details["phone"], "chat_id": chat_id})
 
     await notify_admin(
         f"<b>✅ Отбивка отправлена</b><br/>"
         f"chat_id: <code>{chat_id}</code><br/>"
-        f"тел: <code>{escape_html(f['phone'])}</code><br/>"
-        f"record_id: <code>{escape_html(f['record_id'])}</code>"
+        f"тел: <code>{escape_html(details['phone'])}</code><br/>"
+        f"record_id: <code>{escape_html(record_id)}</code>"
     )
     return {"ok": True}
 
@@ -365,7 +441,7 @@ async def telegram_webhook(request: Request):
         chat = msg.get("chat", {})
         chat_id = chat.get("id")
 
-        await answer_callback(cq_id)
+        await tg_post("answerCallbackQuery", {"callback_query_id": cq_id})
 
         if data.startswith("menu:"):
             action = data.split(":", 1)[1]
@@ -381,7 +457,11 @@ async def telegram_webhook(request: Request):
                 await send_client(
                     chat_id,
                     "Нажмите кнопку ниже, чтобы отправить номер телефона (нужно для напоминаний о записи).",
-                    reply_markup=contact_keyboard(),
+                    reply_markup={
+                        "keyboard": [[{"text": "📱 Отправить номер", "request_contact": True}]],
+                        "resize_keyboard": True,
+                        "one_time_keyboard": True,
+                    },
                     meta="LINK_PHONE",
                 )
                 return JSONResponse(content={"ok": True})
