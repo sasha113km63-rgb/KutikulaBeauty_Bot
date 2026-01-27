@@ -32,6 +32,127 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "5616469242"))
 ONLINE_BOOKING_URL = os.getenv("ONLINE_BOOKING_URL", "https://n561655.yclients.com/")
 BOOKING_ENABLED = os.getenv("BOOKING_ENABLED", "false").lower() == "true"
 
+# ---------------------------------------------------------------------
+# YCLIENTS webhook (создание/изменение записи)
+# ---------------------------------------------------------------------
+YCLIENTS_WEBHOOK_SECRET = os.getenv("YCLIENTS_WEBHOOK_SECRET", "")  # можно пустым, но лучше задать
+
+def extract_from_yclients_webhook(payload: dict) -> dict:
+    """
+    Пытаемся вытащить из webhook хоть что-то полезное.
+    Структуры у YCLIENTS бывают разные, поэтому делаем максимально устойчиво.
+    """
+    # Иногда событие лежит в payload["data"]
+    d = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+
+    # record id
+    record_id = d.get("id") or d.get("record_id") or d.get("appointment_id") or d.get("event_id")
+    record_id = safe_str(record_id)
+
+    # phone
+    phone_raw = None
+    if isinstance(d.get("client"), dict):
+        phone_raw = d["client"].get("phone") or d["client"].get("phone_number")
+    phone_raw = phone_raw or d.get("phone") or d.get("client_phone")
+    phone = normalize_phone(safe_str(phone_raw)) or safe_str(phone_raw)
+
+    # datetime
+    start_str = d.get("start_at") or d.get("datetime") or d.get("date_time") or d.get("seance_date")
+    start_dt = try_parse_dt(start_str) if start_str else None
+
+    # service / master / price
+    service = "УСЛУГА"
+    master = ""
+    price = ""
+
+    # services может быть списком
+    if isinstance(d.get("services"), list) and d["services"]:
+        s0 = d["services"][0]
+        if isinstance(s0, dict):
+            service = s0.get("title") or s0.get("name") or service
+            if s0.get("price"):
+                price = str(s0.get("price"))
+    # service может быть строкой/словарём
+    if isinstance(d.get("service"), dict):
+        service = d["service"].get("title") or d["service"].get("name") or service
+        if d["service"].get("price"):
+            price = str(d["service"]["price"])
+    elif isinstance(d.get("service"), str):
+        service = d["service"]
+
+    if isinstance(d.get("staff"), dict):
+        master = d["staff"].get("name") or master
+    if isinstance(d.get("master"), dict):
+        master = d["master"].get("name") or master
+    elif isinstance(d.get("master"), str):
+        master = d["master"]
+
+    # общая цена
+    if not price:
+        price = safe_str(d.get("price") or d.get("cost") or "")
+
+    return {
+        "record_id": record_id,
+        "phone": phone,
+        "start_dt": start_dt,
+        "service": safe_str(service),
+        "master": safe_str(master),
+        "price": safe_str(price),
+        "raw": payload,
+    }
+
+@app.post("/yclients-webhook")
+async def yclients_webhook(request: Request):
+    # защита секретом (рекомендую)
+    secret = request.query_params.get("secret", "")
+    if YCLIENTS_WEBHOOK_SECRET and secret != YCLIENTS_WEBHOOK_SECRET:
+        return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden"})
+
+    payload = await request.json()
+    logger.info(f"YCLIENTS webhook: {payload}")
+
+    f = extract_from_yclients_webhook(payload)
+
+    # если не смогли достать телефон — сообщаем админу и выходим
+    if not f["phone"]:
+        await notify_admin(f"<b>YCLIENTS webhook</b><br/>Не нашла телефон клиента в payload.<br/><pre>{escape_html(json.dumps(payload, ensure_ascii=False)[:1500])}</pre>")
+        return {"ok": True}
+
+    phone_map = phone_to_chat_map()
+    chat_id = phone_map.get(str(f["phone"]))
+
+    if not chat_id:
+        await notify_admin(
+            f"<b>Новая запись в YCLIENTS</b><br/>"
+            f"Телефон: <code>{escape_html(f['phone'])}</code><br/>"
+            f"Но клиент не привязан к боту (не отправлял номер)."
+        )
+        return {"ok": True}
+
+    # формируем “отбивку”
+    if f["start_dt"]:
+        time_line = f["start_dt"].strftime("%H:%M")
+        dt_line = f"Дата и время визита: {f['start_dt'].strftime('%d.%m.%Y')} {time_line}"
+    else:
+        dt_line = "Дата и время визита: уточните у администратора"
+
+    price_txt = f"Предварительная cтoимoсть: {f['price']}" if f["price"] else "Предварительная cтoимoсть: —"
+    master_txt = f"{f['master']}" if f["master"] else "*к какому Mастеру*"
+
+    msg = tpl_booking_created(
+        service=f["service"] or "УСЛУГА",
+        master=master_txt,
+        price=price_txt,
+        dt_str=dt_line,
+    )
+    await send_client(chat_id, msg, meta="BOOKING_CREATED_WEBHOOK")
+
+    # чтобы не слать повторно
+    if f["record_id"]:
+        mark_sent(f["record_id"], "created", {"src": "webhook"})
+
+    return {"ok": True}
+
 def is_admin_chat(chat_id: int) -> bool:
     return ADMIN_CHAT_ID != 0 and chat_id == ADMIN_CHAT_ID
 
