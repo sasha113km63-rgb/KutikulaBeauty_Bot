@@ -1,218 +1,214 @@
+# -*- coding: utf-8 -*-
+"""
+KUTIKULA Beauty Assistant — Telegram bot + YCLIENTS webhooks
+
+Функции:
+- Telegram:
+  - приветствие (/start, привет, здравствуйте...)
+  - кнопки: Онлайн-запись, Написать администратору, Привязать номер
+  - привязка телефона (contact или текстом)
+  - ответы клиента: "+" подтверждение, "-" запрос отмены/переноса (уведомление админу)
+  - дублирование входящих сообщений клиент->админ
+
+- YCLIENTS:
+  - webhook /yclients-webhook?secret=... (create/update/delete)
+  - "отбивка" при создании записи (шаблон "Вы записаны...")
+  - "отбивка" при отмене (delete/cancel)
+  - "отбивка" при переносе/изменении времени (update с изменением datetime)
+  - планировщик напоминаний (3 дня, 1 день, 2 часа) — отправляет только будущие напоминания
+
+Хранение (в файловой системе сервиса):
+- storage_phone_map.json  — phone -> chat_id
+- storage_records.json    — record_id -> {"datetime": "...", "phone": "...", ...}
+- storage_reminders.json  — список будущих напоминаний
+- storage_sent.json       — дедупликация отправок (record_id + type)
+
+ENV:
+TELEGRAM_TOKEN
+ADMIN_CHAT_ID
+ONLINE_BOOKING_URL (если нет — берём https://n561655.yclients.com/)
+YCLIENTS_COMPANY_ID
+YCLIENTS_WEBHOOK_SECRET (строка из query param secret=...)
+(+ ваши остальные переменные остаются как есть)
+"""
 import os
 import json
 import re
 import logging
-import aiohttp
 import html
 import asyncio
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, List, Tuple
 
+import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from config import TELEGRAM_TOKEN, YCLIENTS_COMPANY_ID
+from yclients_api import get_record_by_id
 
-# Мягкий импорт: деплой не должен падать из‑за несовпадения функций
-try:
-    from yclients_api import (
-        get_categories,
-        get_services_by_category,
-        get_masters_for_service,
-        create_booking,
-        get_headers,
-        BASE_URL,
-        get_record_by_id,
-    )
-except Exception:
-    from yclients_api import (
-        get_categories,
-        get_services_by_category,
-        get_masters_for_service,
-        create_booking,
-        get_headers,
-        BASE_URL,
-    )
-    get_record_by_id = None  # type: ignore
+# ----------------- CONFIG -----------------
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+ONLINE_BOOKING_URL = os.getenv("ONLINE_BOOKING_URL", "https://n561655.yclients.com/").strip()
 
-# ------------------- УТИЛИТЫ -------------------
-def safe_str(x) -> str:
+YCLIENTS_COMPANY_ID = os.getenv("YCLIENTS_COMPANY_ID", "").strip()
+YCLIENTS_WEBHOOK_SECRET = os.getenv("YCLIENTS_WEBHOOK_SECRET", "").strip()
+
+# storage files
+PHONE_MAP_FILE = "storage_phone_map.json"
+STATE_FILE = "storage_state.json"          # optional (steps)
+RECORDS_FILE = "storage_records.json"      # record_id -> last known details
+REMINDERS_FILE = "storage_reminders.json"  # future reminders queue
+SENT_FILE = "storage_sent.json"            # dedupe (record_id:type)
+
+# timing
+TICK_SECONDS = int(os.getenv("TICK_SECONDS", "30"))
+# do not send reminders that are already in the past by more than this
+PAST_GRACE_SECONDS = int(os.getenv("PAST_GRACE_SECONDS", "60"))
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("kutikula_bot")
+
+app = FastAPI()
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# ----------------- HELPERS -----------------
+def safe_str(x: Any) -> str:
     return "" if x is None else str(x)
 
 def escape_html(s: str) -> str:
     return html.escape(s or "")
 
-def try_parse_dt(s: str):
+def md_escape(s: str) -> str:
+    # basic MarkdownV2 is painful; we use Markdown (classic) and keep it simple
+    return (s or "").replace("*", "").replace("_", "").replace("`", "")
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def normalize_phone(s: str) -> str:
+    s = safe_str(s)
+    digits = re.sub(r"\D+", "", s)
+    if not digits:
+        return ""
+    # RU common
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 10:
+        digits = "7" + digits
+    if digits.startswith("7") and len(digits) == 11:
+        return "+" + digits
+    if digits.startswith("+") and len(digits) >= 11:
+        return digits
+    return "+" + digits if not digits.startswith("+") else digits
+
+def try_parse_dt(s: str) -> Optional[datetime]:
     if not s:
         return None
-    s = str(s).strip()
+    s = safe_str(s).strip()
+    # handle "Z"
     try:
-        # ISO, иногда с Z
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # iso with offset
+        if "T" in s and ("+" in s or s.count(":") >= 2):
+            return datetime.fromisoformat(s)
     except Exception:
         pass
+    # common formats
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M"):
         try:
-            return datetime.strptime(s, fmt)
+            # assume local time is UTC+4 (Samara) if no tz
+            dt = datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=timezone(timedelta(hours=4)))
         except Exception:
             continue
     return None
 
-def normalize_phone(text: str) -> str | None:
-    digits = re.sub(r"\D+", "", text or "")
-    if len(digits) < 10:
-        return None
-    if digits.startswith("8") and len(digits) == 11:
-        digits = "7" + digits[1:]
-    if not digits.startswith("7") and len(digits) == 10:
-        digits = "7" + digits
-    if len(digits) != 11:
-        return None
-    return "+" + digits
-
-def md_sanitize(s: str) -> str:
-    if not s:
-        return ""
-    for ch in ["*", "_", "`", "[", "]"]:
-        s = s.replace(ch, f"\\{ch}")
-    return s
-
-def first_non_empty(*vals: Any) -> str:
-    for v in vals:
-        if v is None:
-            continue
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-        if not isinstance(v, str):
-            sv = safe_str(v).strip()
-            if sv:
-                return sv
-    return ""
-
-# ------------------- ЛОГИ/APP -------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("main")
-
-app = FastAPI()
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# ------------------- ENV -------------------
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-ONLINE_BOOKING_URL = os.getenv("ONLINE_BOOKING_URL", "https://n561655.yclients.com/")
-YCLIENTS_WEBHOOK_SECRET = os.getenv("YCLIENTS_WEBHOOK_SECRET", "")
-
-# Время студии: по умолчанию Самара/МСК+1 = UTC+4
-STUDIO_TZ_OFFSET_HOURS = int(os.getenv("STUDIO_TZ_OFFSET_HOURS", "4"))
-
-MEMORY_FILE = "dialog_memory.json"
-SENT_FILE = "sent_events.json"
-REMINDERS_FILE = "reminders.json"
-
-# ------------------- JSON STORAGE -------------------
-def _load_json(path: str) -> dict:
+def load_json(path: str, default):
     try:
-        if not os.path.exists(path):
-            return {}
         with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
+            return json.load(f)
     except Exception:
-        return {}
+        return default
 
-def _save_json(path: str, data: dict):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Не смог сохранить {path}: {e}")
+def save_json(path: str, data) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_state(chat_id: int) -> dict:
-    mem = _load_json(MEMORY_FILE)
-    return mem.get(str(chat_id), {"step": "idle", "data": {}})
+def phone_map() -> Dict[str, int]:
+    return {k: int(v) for k, v in load_json(PHONE_MAP_FILE, {}).items()}
 
-def set_state(chat_id: int, step: str, data: dict):
-    mem = _load_json(MEMORY_FILE)
-    mem[str(chat_id)] = {"step": step, "data": data}
-    _save_json(MEMORY_FILE, mem)
+def set_phone_map(phone: str, chat_id: int) -> None:
+    m = load_json(PHONE_MAP_FILE, {})
+    m[str(phone)] = int(chat_id)
+    save_json(PHONE_MAP_FILE, m)
 
-def reset_state(chat_id: int):
-    set_state(chat_id, "idle", {})
+def get_state(chat_id: int) -> Dict[str, Any]:
+    st = load_json(STATE_FILE, {})
+    return st.get(str(chat_id), {"step": "idle", "data": {}})
 
-def phone_to_chat_map() -> dict[str, int]:
-    mem = _load_json(MEMORY_FILE)
-    out = {}
-    for chat_id_str, st in mem.items():
-        data = (st or {}).get("data", {}) or {}
-        ph = data.get("phone")
-        if ph:
-            out[str(ph)] = int(chat_id_str)
-    return out
+def set_state(chat_id: int, step: str, data: Optional[Dict[str, Any]] = None) -> None:
+    st = load_json(STATE_FILE, {})
+    st[str(chat_id)] = {"step": step, "data": data or {}}
+    save_json(STATE_FILE, st)
+
+def sent_key(record_id: str, kind: str) -> str:
+    return f"{record_id}:{kind}"
 
 def was_sent(record_id: str, kind: str) -> bool:
-    sent = _load_json(SENT_FILE)
-    return bool(sent.get(record_id, {}).get(kind))
+    s = load_json(SENT_FILE, {})
+    return sent_key(record_id, kind) in s
 
-def mark_sent(record_id: str, kind: str, extra: dict | None = None):
-    sent = _load_json(SENT_FILE)
-    sent.setdefault(record_id, {})
-    sent[record_id][kind] = extra or True
-    _save_json(SENT_FILE, sent)
+def mark_sent(record_id: str, kind: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    s = load_json(SENT_FILE, {})
+    s[sent_key(record_id, kind)] = {"ts": now_utc().isoformat(), **(extra or {})}
+    save_json(SENT_FILE, s)
 
-def _now_studio() -> datetime:
-    return datetime.utcnow() + timedelta(hours=STUDIO_TZ_OFFSET_HOURS)
+def records_store() -> Dict[str, Any]:
+    return load_json(RECORDS_FILE, {})
 
-# ------------------- TELEGRAM HELPERS -------------------
-async def tg_post(method: str, payload: dict):
-    url = f"{TELEGRAM_API}/{method}"
+def save_record(record_id: str, data: Dict[str, Any]) -> None:
+    store = load_json(RECORDS_FILE, {})
+    store[str(record_id)] = data
+    save_json(RECORDS_FILE, store)
+
+# ----------------- TELEGRAM SEND -----------------
+async def tg_post(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not TELEGRAM_TOKEN:
+        return {"ok": False, "error": "TELEGRAM_TOKEN empty"}
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as resp:
+        async with session.post(f"{TELEGRAM_API}/{method}", json=payload, timeout=20) as r:
             try:
-                return await resp.json()
+                data = await r.json()
             except Exception:
-                return {"ok": False, "raw": await resp.text()}
+                data = {"ok": False, "status": r.status, "text": await r.text()}
+            return data
 
-async def send_message(chat_id: int, text: str, reply_markup: dict | None = None, parse_mode: str = "Markdown"):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True}
+async def send_client(chat_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None, parse_mode: str = "HTML") -> None:
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True, "parse_mode": parse_mode}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return await tg_post("sendMessage", payload)
+    await tg_post("sendMessage", payload)
 
-def inline_keyboard(rows):
-    return {"inline_keyboard": rows}
-
-async def notify_admin(text_html: str):
-    if ADMIN_CHAT_ID == 0:
+async def notify_admin(text: str) -> None:
+    if not ADMIN_CHAT_ID:
         return
-    await tg_post("sendMessage", {
-        "chat_id": ADMIN_CHAT_ID,
-        "text": text_html,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    })
+    try:
+        await send_client(int(ADMIN_CHAT_ID), text, parse_mode="HTML")
+    except Exception as e:
+        logger.exception(f"notify_admin failed: {e}")
 
-async def send_client(chat_id: int, text_md: str, reply_markup: dict | None = None, meta: str | None = None):
-    res = await send_message(chat_id, text_md, reply_markup=reply_markup, parse_mode="Markdown")
-    if chat_id != ADMIN_CHAT_ID:
-        ok = bool(res.get("ok"))
-        status = "ОТПРАВЛЕНО" if ok else f"ОШИБКА: {escape_html(safe_str(res))}"
-        meta_txt = f"<b>{escape_html(meta)}</b><br/>" if meta else ""
-        admin_text = (
-            f"{meta_txt}<b>➡️ Исходящее клиенту</b><br/>"
-            f"chat_id: <code>{chat_id}</code><br/>"
-            f"Статус: <b>{status}</b><br/><br/>"
-            f"{escape_html(text_md)[:3500]}"
-        )
-        await notify_admin(admin_text)
-    return res
+def main_menu() -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "📅 Онлайн-запись", "url": ONLINE_BOOKING_URL}],
+            [{"text": "💬 Написать администратору", "callback_data": "menu:to_admin"}],
+            [{"text": "📱 Привязать номер", "callback_data": "menu:link_phone"}],
+        ]
+    }
 
-# ------------------- UI -------------------
-def main_menu():
-    return inline_keyboard([
-        [{"text": "📅 Онлайн-запись", "url": ONLINE_BOOKING_URL}],
-        [{"text": "💬 Написать администратору", "callback_data": "menu:to_admin"}],
-        [{"text": "📱 Привязать номер", "callback_data": "menu:link_phone"}],
-    ])
-
+# ----------------- TEMPLATES -----------------
 WELCOME_TEXT = (
     "Здравствуйте 🌸\n"
     "Я — виртуальный администратор студии KUTIKULA.\n\n"
@@ -221,381 +217,383 @@ WELCOME_TEXT = (
     f"{ONLINE_BOOKING_URL}"
 )
 
-async def show_welcome(chat_id: int):
-    await send_client(chat_id, WELCOME_TEXT, reply_markup=main_menu(), meta="WELCOME")
-    reset_state(chat_id)
-
-# ------------------- ШАБЛОНЫ -------------------
-ADDRESS_BLOCK = (
-    "Aдрес cтудии\n"
-    "ул. Фасаднaя, д. 21\n\n"
-    "Вхoд сo стороны улицы Фacaдная\n"
-    "Яндeкc.Карты\n"
-    "https://kutikula116.clients.site"
-)
-
-def tpl_booking_created(service: str, master: str, price: str, dt_str: str) -> str:
+def tpl_booking_created(service: str, master: str, price_line: str, dt_line: str) -> str:
     return (
-        "👋 Вы записaны в \n"
-        "Studio KUTIKULA \n\n"
-        f"▫️{service}\n"
+        "👋 Вы записaны в\n"
+        "Studio KUTIKULA\n\n"
+        f"▫️ {service}\n"
         f"{master}\n"
-        f"{price}\n"
-        f"{dt_str}\n\n"
-        f"{ADDRESS_BLOCK}\n\n"
+        f"{price_line}\n"
+        f"{dt_line}\n\n"
+        "Aдрес cтудии\n"
+        "ул. Фасаднaя, д. 21\n\n"
+        "Вхoд сo стороны улицы Фacaдная\n"
+        "Яндeкc.Карты\n"
+        "https://kutikula116.clients.site\n\n"
         "Ждём Bаc!"
     )
 
-def tpl_reminder(dt_line: str, service: str) -> str:
-    header = "Дoбрый вeчер!\nHа cвязи Nail Studio KUTIKULA\n\n"
+def tpl_reminder_3d(dt_human: str, time_human: str, service: str) -> str:
     return (
-        f"{header}"
+        "Дoбрый вeчер!\n"
+        "Hа cвязи Nail Studio KUTIKULA\n\n"
         "Hапоминaем, чтo Вы записaны\n"
-        f"*{dt_line}*\n"
-        f"▫️{service}\n\n"
+        f"<b>{escape_html(dt_human)},</b>\n"
+        f"<b>нa {escape_html(time_human)}</b>\n"
+        f"▫️ {escape_html(service)}\n\n"
         "Aдрec cтyдии:\n"
         "yл. Фacаднaя, 21\n"
-        "_вxoд cо стoрoны yл. Фaсадной_\n\n"
+        "<i>вxoд cо стoрoны yл. Фaсадной</i>\n\n"
         "Cсылка на Яндекc.Kaрты:\n"
         "https://kutikula116.clients.site\n\n"
-        "*Пожалyйcтa, отправьтe:*\n"
-        "*«+» — если пoдтверждаeте визит*\n"
-        "*«–» — eсли xотитe oтмeнить или перeнеcти запись*"
+        "<b>Пожалyйcтa, отправьтe:</b>\n"
+        "<b>«+» — если пoдтверждаeте визит</b>\n"
+        "<b>«–» — eсли xотитe oтмeнить или перeнеcти запись</b>"
     )
 
-def tpl_cancel(service: str, dt_line: str) -> str:
+def tpl_reminder_1d(dt_human: str, time_human: str, service: str) -> str:
+    # same text style, but could be tweaked later
+    return tpl_reminder_3d(dt_human, time_human, service)
+
+def tpl_reminder_2h(time_human: str) -> str:
+    return (
+        f"⏳ Ждём Baс в <b>{escape_html(time_human)}</b>\n\n"
+        "<b>Пoжaлyйстa, отпрaвьтe:</b>\n"
+        "<b>«+» — еcли пoдтверждaетe визит</b>\n"
+        "<b>«–» — ecли xотитe oтменить или пeрeнеcти зaпись</b>"
+    )
+
+def tpl_cancelled(dt_human: str, time_human: str, service: str) -> str:
     return (
         "Вaша зaпиcь\n"
-        f"▫️{service}\n"
-        f"нa {dt_line} oтмeнeнa.\n\n"
+        f"▫️{escape_html(service)}\n"
+        f"нa {escape_html(dt_human)} в {escape_html(time_human)} oтмeнeнa.\n\n"
         "Вы мoжeте выбрать удобнoе для себя врeмя, вocпoльзовaвшиcь онлaйн-зaписью пeрeйдя по ccылкe:\n"
-        f"*{ONLINE_BOOKING_URL}*"
+        f"<b>{escape_html(ONLINE_BOOKING_URL)}</b>"
     )
 
-def tpl_reschedule(service: str, old_dt: str, new_dt: str) -> str:
+def tpl_rescheduled(old_dt: str, old_time: str, new_dt: str, new_time: str, service: str) -> str:
     return (
-        "Ваша запись изменена.\n"
-        f"▫️{service}\n\n"
-        f"Было: *{old_dt}*\n"
-        f"Стало: *{new_dt}*\n\n"
-        "Если нужно перенести или отменить — можно сделать это через онлайн-запись:\n"
-        f"*{ONLINE_BOOKING_URL}*"
+        "Ваша запись перенесена:\n"
+        f"▫️{escape_html(service)}\n\n"
+        f"Было: <b>{escape_html(old_dt)} {escape_html(old_time)}</b>\n"
+        f"Стало: <b>{escape_html(new_dt)} {escape_html(new_time)}</b>\n\n"
+        "Если нужно изменить ещё раз — используйте онлайн-запись:\n"
+        f"<b>{escape_html(ONLINE_BOOKING_URL)}</b>"
     )
 
-# ------------------- REMINDERS STORAGE -------------------
-def reminders_load() -> dict:
-    return _load_json(REMINDERS_FILE)
+# ----------------- REMINDERS QUEUE -----------------
+def load_reminders() -> List[Dict[str, Any]]:
+    return load_json(REMINDERS_FILE, [])
 
-def reminders_save(data: dict):
-    _save_json(REMINDERS_FILE, data)
+def save_reminders(items: List[Dict[str, Any]]) -> None:
+    save_json(REMINDERS_FILE, items)
 
-def reminders_upsert(record_id: str, payload: dict):
-    data = reminders_load()
-    data[record_id] = payload
-    reminders_save(data)
+def reminder_id(record_id: str, kind: str) -> str:
+    return f"{record_id}:{kind}"
 
-def reminders_get(record_id: str) -> dict | None:
-    data = reminders_load()
-    return data.get(record_id)
+def upsert_reminder(record_id: str, chat_id: int, when_dt: datetime, kind: str, payload: Dict[str, Any]) -> None:
+    """Add/replace reminder only if it's in the future (with small grace)."""
+    now = now_utc()
+    when_utc = when_dt.astimezone(timezone.utc)
+    if when_utc <= now + timedelta(seconds=PAST_GRACE_SECONDS):
+        # do not enqueue past reminders
+        return
 
-def reminders_delete(record_id: str):
-    data = reminders_load()
-    if record_id in data:
-        del data[record_id]
-        reminders_save(data)
+    items = load_reminders()
+    rid = reminder_id(record_id, kind)
+    new_item = {
+        "id": rid,
+        "record_id": str(record_id),
+        "chat_id": int(chat_id),
+        "kind": kind,
+        "when": when_utc.isoformat(),
+        "payload": payload,
+        "sent": False,
+    }
+    # replace if exists
+    items = [x for x in items if x.get("id") != rid]
+    items.append(new_item)
+    save_reminders(items)
 
-# ------------------- YCLIENTS WEBHOOK PARSERS -------------------
-def extract_from_yclients_webhook(payload: dict) -> dict:
-    d = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    status = safe_str(payload.get("status") or d.get("status") or "").lower().strip()
-    record_id = payload.get("resource_id") or d.get("id") or d.get("record_id")
-    record_id = safe_str(record_id)
-    company_id = payload.get("company_id") or d.get("company_id") or YCLIENTS_COMPANY_ID
-    try:
-        company_id = int(company_id)
-    except Exception:
-        company_id = int(YCLIENTS_COMPANY_ID)
+def delete_reminders_for_record(record_id: str) -> None:
+    items = load_reminders()
+    items = [x for x in items if x.get("record_id") != str(record_id)]
+    save_reminders(items)
 
-    phone_raw = None
-    if isinstance(d.get("client"), dict):
-        phone_raw = d["client"].get("phone") or d["client"].get("phone_number")
-    phone_raw = phone_raw or d.get("phone") or d.get("client_phone")
-    phone = normalize_phone(safe_str(phone_raw)) or safe_str(phone_raw)
-
-    start_str = d.get("start_at") or d.get("datetime") or d.get("date")
-    start_dt = try_parse_dt(start_str) if start_str else None
-
-    return {"status": status, "record_id": record_id, "company_id": company_id, "phone": phone, "start_dt": start_dt, "raw": payload}
-
-def _pick_service_and_price(rec: dict) -> tuple[str, str]:
-    services = rec.get("services")
-    if isinstance(services, list) and services:
-        s0 = services[0]
-        if isinstance(s0, dict):
-            title = first_non_empty(s0.get("title"), s0.get("name"), s0.get("label"))
-            price = first_non_empty(s0.get("price"), s0.get("cost"), s0.get("amount"), s0.get("sum"))
-            return title, price
-        if isinstance(s0, str):
-            return s0, ""
-    service = rec.get("service")
-    if isinstance(service, dict):
-        title = first_non_empty(service.get("title"), service.get("name"))
-        price = first_non_empty(service.get("price"), service.get("cost"), service.get("amount"), service.get("sum"))
-        return title, price
-    title = first_non_empty(rec.get("service_title"), rec.get("services_titles"), rec.get("title"))
-    price = first_non_empty(rec.get("price"), rec.get("cost"), rec.get("amount"), rec.get("sum"), rec.get("total"), rec.get("total_cost"))
-    return title, price
-
-def _pick_master(rec: dict) -> str:
-    staff = rec.get("staff")
-    if isinstance(staff, dict):
-        return first_non_empty(staff.get("name"), staff.get("title"), staff.get("full_name"))
-    if isinstance(staff, list) and staff:
-        s0 = staff[0]
-        if isinstance(s0, dict):
-            return first_non_empty(s0.get("name"), s0.get("title"), s0.get("full_name"))
-        if isinstance(s0, str):
-            return s0
-    return first_non_empty(rec.get("staff_name"), rec.get("master"), rec.get("master_name"))
-
-def extract_from_record_detail(rec: dict) -> dict:
-    phone_raw = None
-    if isinstance(rec.get("client"), dict):
-        phone_raw = rec["client"].get("phone") or rec["client"].get("phone_number")
-    phone_raw = phone_raw or rec.get("client_phone") or rec.get("phone")
-    phone = normalize_phone(safe_str(phone_raw)) or safe_str(phone_raw)
-
-    start_str = first_non_empty(rec.get("datetime"), rec.get("date"), rec.get("start_at"), rec.get("start"))
-    start_dt = try_parse_dt(start_str) if start_str else None
-
-    service, price = _pick_service_and_price(rec)
-    master = _pick_master(rec)
-
-    return {"phone": phone, "start_dt": start_dt, "service": safe_str(service), "master": safe_str(master), "price": safe_str(price)}
-
-def fmt_dt(dt: datetime | None) -> str:
-    if not dt:
-        return "—"
-    return dt.strftime("%d.%m.%Y %H:%M")
-
-# ------------------- REMINDER LOOP -------------------
-async def reminder_loop():
-    await asyncio.sleep(2)
+async def reminders_worker() -> None:
+    """Background task that sends due reminders once."""
     while True:
         try:
-            data = reminders_load()
-            if not data:
-                await asyncio.sleep(60)
+            items = load_reminders()
+            if not items:
+                await asyncio.sleep(TICK_SECONDS)
                 continue
 
-            now = _now_studio()
+            now = now_utc()
             changed = False
+            for it in items:
+                if it.get("sent"):
+                    continue
+                when = try_parse_dt(it.get("when", ""))
+                if not when:
+                    it["sent"] = True
+                    changed = True
+                    continue
+                when_utc = when.astimezone(timezone.utc)
+                if when_utc <= now:
+                    record_id = safe_str(it.get("record_id"))
+                    kind = safe_str(it.get("kind"))
+                    # dedupe at storage_sent level too
+                    if record_id and kind and not was_sent(record_id, f"rem_{kind}"):
+                        try:
+                            await send_client(int(it["chat_id"]), it["payload"]["text"], reply_markup=main_menu(), parse_mode=it["payload"].get("parse_mode", "HTML"))
+                            mark_sent(record_id, f"rem_{kind}", {"chat_id": it["chat_id"]})
+                            await notify_admin(f"<b>⏰ Напоминание отправлено</b><br/>chat_id: <code>{it['chat_id']}</code><br/>record_id: <code>{escape_html(record_id)}</code><br/>тип: <code>{escape_html(kind)}</code>")
+                        except Exception as e:
+                            logger.exception(f"send reminder failed: {e}")
+                    it["sent"] = True
+                    changed = True
 
-            for rid, r in list(data.items()):
-                try:
-                    chat_id = int(r.get("chat_id") or 0)
-                    if not chat_id:
-                        continue
-
-                    start_iso = r.get("start_dt")
-                    start_dt = try_parse_dt(start_iso) if isinstance(start_iso, str) else None
-                    if not start_dt:
-                        continue
-
-                    service = md_sanitize(r.get("service") or "УСЛУГА")
-                    sent = r.get("sent", {}) or {}
-
-                    t3 = start_dt - timedelta(days=3)
-                    t1 = start_dt - timedelta(days=1)
-                    t2h = start_dt - timedelta(hours=2)
-
-                    if now >= t3 and not sent.get("t-3d"):
-                        await send_client(chat_id, tpl_reminder(fmt_dt(start_dt), service), meta="REMINDER_3D")
-                        sent["t-3d"] = True
-                        changed = True
-
-                    if now >= t1 and not sent.get("t-1d"):
-                        await send_client(chat_id, tpl_reminder(fmt_dt(start_dt), service), meta="REMINDER_1D")
-                        sent["t-1d"] = True
-                        changed = True
-
-                    if now >= t2h and not sent.get("t-2h"):
-                        msg = (
-                            f"⏳ Ждём Baс в *{start_dt.strftime('%H:%M')}*\n\n"
-                            "*Пoжaлyйстa, отпрaвьтe:*\n"
-                            "*«+» — еcли пoдтверждaетe визит*\n"
-                            "*«–» — ecли xотитe oтменить или пeрeнеcти зaпись*"
-                        )
-                        await send_client(chat_id, msg, meta="REMINDER_2H")
-                        sent["t-2h"] = True
-                        changed = True
-
-                    if now > start_dt + timedelta(hours=6):
-                        del data[rid]
+            # cleanup old sent reminders
+            cleaned: List[Dict[str, Any]] = []
+            for it in items:
+                when = try_parse_dt(it.get("when", ""))
+                if it.get("sent") and when:
+                    # keep a little, then drop
+                    if when.astimezone(timezone.utc) < now - timedelta(days=1):
                         changed = True
                         continue
-
-                    r["sent"] = sent
-                    data[rid] = r
-
-                except Exception as e:
-                    logger.error(f"reminder_loop record error: {e}")
-
+                cleaned.append(it)
             if changed:
-                reminders_save(data)
+                save_reminders(cleaned)
 
         except Exception as e:
-            logger.error(f"reminder_loop error: {e}")
+            logger.exception(f"reminders_worker loop error: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(TICK_SECONDS)
 
 @app.on_event("startup")
-async def on_startup():
-    asyncio.create_task(reminder_loop())
+async def _startup():
+    # start scheduler
+    asyncio.create_task(reminders_worker())
 
-# ------------------- YCLIENTS WEBHOOK -------------------
-@app.post("/yclients-webhook")
-async def yclients_webhook(request: Request):
-    secret_q = request.query_params.get("secret", "")
-    secret_h = request.headers.get("X-Webhook-Secret", "")
-    incoming = secret_q or secret_h
-    if YCLIENTS_WEBHOOK_SECRET and incoming != YCLIENTS_WEBHOOK_SECRET:
-        return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden"})
+# ----------------- YCLIENTS WEBHOOK PARSING -----------------
+def parse_yclients_payload(payload: Dict[str, Any]) -> Tuple[str, str, int, Dict[str, Any]]:
+    """
+    Return (status, record_id, company_id, raw_data)
+    """
+    status = safe_str(payload.get("status") or payload.get("event") or payload.get("type") or "").lower()
+    record_id = ""
+    company_id = 0
 
-    payload = await request.json()
-    logger.info(f"YCLIENTS webhook: {payload}")
+    # yclients often: {"company_id":..., "resource":"record", "resource_id":..., "status":"create|update|delete", "data":{...}}
+    if payload.get("resource_id") is not None:
+        record_id = safe_str(payload.get("resource_id"))
+    if payload.get("record_id") is not None:
+        record_id = safe_str(payload.get("record_id"))
+    if isinstance(payload.get("data"), dict) and payload["data"].get("id") is not None:
+        record_id = safe_str(payload["data"].get("id"))
 
-    f = extract_from_yclients_webhook(payload)
-    status = f["status"]
-    record_id = f["record_id"] or ""
-
-    is_create = status in {"create", "created", "new"}
-    is_update = status in {"update", "updated", "edit", "edited", "change", "changed"}
-    is_delete = status in {"delete", "deleted", "cancel", "canceled", "cancelled", "remove", "removed"}
-
-    if not (is_create or is_update or is_delete):
-        return {"ok": True}
-
-    details = {"phone": f["phone"], "start_dt": f["start_dt"], "service": "", "master": "", "price": ""}
-
-    rec = None
-    if get_record_by_id and record_id and (is_create or is_update):
+    if payload.get("company_id") is not None:
+        company_id = int(payload.get("company_id"))
+    elif payload.get("company") is not None:
+        company_id = int(payload.get("company"))
+    elif YCLIENTS_COMPANY_ID:
         try:
-            rec = await get_record_by_id(f["company_id"], record_id)
-            if rec:
-                det2 = extract_from_record_detail(rec)
-                for k, v in det2.items():
-                    if (not details.get(k)) and v:
-                        details[k] = v
-        except Exception as e:
-            logger.error(f"get_record_by_id failed: {e}")
+            company_id = int(YCLIENTS_COMPANY_ID)
+        except Exception:
+            company_id = 0
 
-    phone = details["phone"]
-    if not phone:
-        await notify_admin(
-            f"<b>YCLIENTS webhook</b><br/>record_id: <code>{escape_html(record_id)}</code><br/>"
-            "Не нашла телефон (ни в webhook, ни в деталях записи)."
-        )
-        return {"ok": True}
+    # normalize status variants
+    if status in ("created", "new"):
+        status = "create"
+    if status in ("removed", "canceled", "cancelled"):
+        status = "delete"
 
-    chat_id = phone_to_chat_map().get(str(phone))
-    if not chat_id:
-        await notify_admin(
-            f"<b>Событие записи (YCLIENTS)</b><br/>status: <code>{escape_html(status)}</code><br/>"
-            f"record_id: <code>{escape_html(record_id)}</code><br/>"
-            f"Телефон: <code>{escape_html(phone)}</code><br/>"
-            "Клиент не привязан к боту (не отправлял номер)."
-        )
-        return {"ok": True}
+    return status, record_id, company_id, payload
 
-    # ОТМЕНА
-    if is_delete:
-        service_txt = md_sanitize(details["service"] or "УСЛУГА")
-        dt_line = fmt_dt(details["start_dt"])
-        await send_client(chat_id, tpl_cancel(service_txt, dt_line), meta="BOOKING_CANCEL")
-        if record_id:
-            reminders_delete(record_id)
-        await notify_admin(f"<b>❌ Отмена</b><br/>record_id: <code>{escape_html(record_id)}</code><br/>chat_id: <code>{chat_id}</code>")
-        return {"ok": True}
+def record_details_from_api(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    rec = yclients record object (from get_record_by_id)
+    Returns dict: phone, dt (aware), service, master, price
+    """
+    phone_raw = ""
+    if isinstance(rec.get("client"), dict):
+        phone_raw = rec["client"].get("phone") or rec["client"].get("phone_number") or ""
+    phone_raw = phone_raw or rec.get("client_phone") or rec.get("phone") or ""
+    phone = normalize_phone(phone_raw) or safe_str(phone_raw)
 
-    # СОЗДАНИЕ
-    if is_create:
-        dt_line = f"Дата и время визита: {fmt_dt(details['start_dt'])}"
-        service_txt = md_sanitize(details["service"] or "УСЛУГА")
-        master_txt = md_sanitize(details["master"]) if details["master"] else "к какому Мастеру: —"
-        price_txt = f"Предварительная стоимость: {md_sanitize(details['price'])}" if details["price"] else "Предварительная стоимость: —"
+    dt_raw = rec.get("datetime") or rec.get("date") or rec.get("start_at") or ""
+    dt = try_parse_dt(safe_str(dt_raw))
 
-        await send_client(chat_id, tpl_booking_created(service_txt, master_txt, price_txt, dt_line), meta="BOOKING_CREATED")
+    service = ""
+    price = ""
+    if isinstance(rec.get("services"), list) and rec["services"]:
+        s0 = rec["services"][0]
+        if isinstance(s0, dict):
+            service = safe_str(s0.get("title") or s0.get("name") or "")
+            if s0.get("price") is not None:
+                price = safe_str(s0.get("price"))
 
-        if record_id and details["start_dt"]:
-            reminders_upsert(record_id, {
-                "phone": phone,
-                "chat_id": chat_id,
-                "start_dt": details["start_dt"].strftime("%Y-%m-%d %H:%M:%S"),
-                "service": details["service"] or "УСЛУГА",
-                "master": details["master"] or "",
-                "price": details["price"] or "",
-                "sent": {},
-            })
-        return {"ok": True}
+    master = ""
+    if isinstance(rec.get("staff"), dict):
+        master = safe_str(rec["staff"].get("name") or "")
 
-    # ИЗМЕНЕНИЕ / ПЕРЕНОС
-    if is_update:
-        prev = reminders_get(record_id) if record_id else None
-        prev_dt = try_parse_dt(prev.get("start_dt")) if prev and prev.get("start_dt") else None
-        new_dt = details["start_dt"]
+    return {"phone": phone, "dt": dt, "service": service, "master": master, "price": price}
 
-        service_txt = md_sanitize(details["service"] or (prev.get("service") if prev else "") or "УСЛУГА")
+def human_dt(dt: datetime) -> Tuple[str, str]:
+    # show in local timezone (UTC+4)
+    local = dt.astimezone(timezone(timedelta(hours=4)))
+    dt_h = local.strftime("%d.%m.%Y")
+    time_h = local.strftime("%H:%M")
+    return dt_h, time_h
 
-        if not new_dt:
-            if record_id and prev:
-                prev["service"] = details["service"] or prev.get("service") or "УСЛУГА"
-                prev["master"] = details["master"] or prev.get("master") or ""
-                prev["price"] = details["price"] or prev.get("price") or ""
-                reminders_upsert(record_id, prev)
-            return {"ok": True}
+def schedule_all_reminders(record_id: str, chat_id: int, dt: datetime, service: str) -> None:
+    """
+    Create future reminders:
+    - 3 days
+    - 1 day
+    - 2 hours
+    """
+    dt_h, time_h = human_dt(dt)
+    # 3 days
+    upsert_reminder(
+        record_id, chat_id, dt - timedelta(days=3), "3d",
+        {"text": tpl_reminder_3d(dt_h, time_h, service), "parse_mode": "HTML"}
+    )
+    # 1 day
+    upsert_reminder(
+        record_id, chat_id, dt - timedelta(days=1), "1d",
+        {"text": tpl_reminder_1d(dt_h, time_h, service), "parse_mode": "HTML"}
+    )
+    # 2 hours
+    upsert_reminder(
+        record_id, chat_id, dt - timedelta(hours=2), "2h",
+        {"text": tpl_reminder_2h(time_h), "parse_mode": "HTML"}
+    )
 
-        if prev_dt and (fmt_dt(prev_dt) != fmt_dt(new_dt)):
-            await send_client(chat_id, tpl_reschedule(service_txt, fmt_dt(prev_dt), fmt_dt(new_dt)), meta="BOOKING_RESCHEDULE")
-            if record_id:
-                reminders_upsert(record_id, {
-                    "phone": phone,
-                    "chat_id": chat_id,
-                    "start_dt": new_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "service": details["service"] or (prev.get("service") if prev else "УСЛУГА") or "УСЛУГА",
-                    "master": details["master"] or (prev.get("master") if prev else "") or "",
-                    "price": details["price"] or (prev.get("price") if prev else "") or "",
-                    "sent": {},  # заново
-                })
-            return {"ok": True}
-
-        if record_id:
-            reminders_upsert(record_id, {
-                "phone": phone,
-                "chat_id": chat_id,
-                "start_dt": new_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "service": details["service"] or (prev.get("service") if prev else "УСЛУГА") or "УСЛУГА",
-                "master": details["master"] or (prev.get("master") if prev else "") or "",
-                "price": details["price"] or (prev.get("price") if prev else "") or "",
-                "sent": (prev.get("sent") if prev else {}) or {},
-            })
-        return {"ok": True}
-
-    return {"ok": True}
-
-# ------------------- TELEGRAM WEBHOOK -------------------
+# ----------------- ROUTES -----------------
 @app.get("/")
 async def root():
     return {"status": "ok"}
 
+@app.post("/yclients-webhook")
+async def yclients_webhook(request: Request):
+    # secret check
+    incoming = request.query_params.get("secret") or request.headers.get("X-Webhook-Secret") or ""
+    if YCLIENTS_WEBHOOK_SECRET and incoming != YCLIENTS_WEBHOOK_SECRET:
+        return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden"})
+
+    payload = await request.json()
+    status, record_id, company_id, _raw = parse_yclients_payload(payload)
+
+    logger.info(f"YCLIENTS webhook status={status} record_id={record_id} company_id={company_id}")
+
+    if not record_id:
+        await notify_admin(f"<b>YCLIENTS webhook</b><br/>Не смогла определить record_id.<br/><pre>{escape_html(safe_str(payload)[:2000])}</pre>")
+        return {"ok": True}
+
+    # Always fetch record details for create/update (and sometimes delete might still be available)
+    rec = None
+    if status in ("create", "update", "delete"):
+        try:
+            rec = await get_record_by_id(company_id or int(YCLIENTS_COMPANY_ID or "0"), record_id)
+        except Exception as e:
+            logger.exception(f"get_record_by_id failed: {e}")
+            rec = None
+
+    details = record_details_from_api(rec) if isinstance(rec, dict) else {"phone": "", "dt": None, "service": "", "master": "", "price": ""}
+    phone = details.get("phone") or ""
+    dt = details.get("dt")
+    service = details.get("service") or "УСЛУГА"
+    master = details.get("master") or "к какому Мастеру"
+    price = details.get("price") or ""
+    price_line = f"Предварительная cтoимoсть: {md_escape(price)}" if price else "Предварительная cтoимoсть: —"
+
+    # mapping phone -> chat
+    chat_id = None
+    if phone:
+        chat_id = phone_map().get(str(phone))
+
+    # store previous (for reschedule comparison)
+    prev = records_store().get(str(record_id), {})
+    prev_dt = try_parse_dt(prev.get("datetime", "")) if isinstance(prev, dict) else None
+
+    # update stored record snapshot
+    save_record(str(record_id), {
+        "phone": phone,
+        "datetime": dt.isoformat() if dt else "",
+        "service": service,
+        "master": master,
+        "price": price,
+        "updated_at": now_utc().isoformat(),
+    })
+
+    # If no chat link — notify admin and stop
+    if not chat_id:
+        await notify_admin(
+            "<b>YCLIENTS событие</b><br/>"
+            f"status: <code>{escape_html(status)}</code><br/>"
+            f"record_id: <code>{escape_html(record_id)}</code><br/>"
+            f"тел: <code>{escape_html(phone or '—')}</code><br/>"
+            "Клиент не привязан к боту (не отправлял номер)."
+        )
+        # still maintain reminders cleanup on delete/update
+        if status == "delete":
+            delete_reminders_for_record(record_id)
+        if status == "update" and dt:
+            delete_reminders_for_record(record_id)
+        return {"ok": True}
+
+    # --- handle events ---
+    if status == "create":
+        if not was_sent(record_id, "created"):
+            dt_line = f"Дата и время визита: {dt.astimezone(timezone(timedelta(hours=4))).strftime('%d.%m.%Y %H:%M')}" if dt else "Дата и время визита: уточните у администратора"
+            msg = tpl_booking_created(md_escape(service), md_escape(master), md_escape(price_line), md_escape(dt_line))
+            # booking created text is plain, we send as HTML with no tags inside, so safe
+            await send_client(chat_id, msg, reply_markup=main_menu(), parse_mode="HTML")
+            mark_sent(record_id, "created", {"chat_id": chat_id, "phone": phone})
+            await notify_admin(f"<b>✅ Отбивка о записи отправлена</b><br/>chat_id: <code>{chat_id}</code><br/>record_id: <code>{escape_html(record_id)}</code>")
+
+        # schedule reminders (future only)
+        if dt:
+            delete_reminders_for_record(record_id)
+            schedule_all_reminders(record_id, chat_id, dt, service)
+
+    elif status == "update":
+        # detect reschedule: datetime changed
+        if dt and prev_dt and dt.isoformat() != prev_dt.isoformat():
+            old_d, old_t = human_dt(prev_dt)
+            new_d, new_t = human_dt(dt)
+            if not was_sent(record_id, f"resched:{dt.isoformat()}"):
+                await send_client(chat_id, tpl_rescheduled(old_d, old_t, new_d, new_t, service), reply_markup=main_menu(), parse_mode="HTML")
+                mark_sent(record_id, f"resched:{dt.isoformat()}", {"chat_id": chat_id})
+                await notify_admin(f"<b>🔁 Перенос отправлен</b><br/>chat_id: <code>{chat_id}</code><br/>record_id: <code>{escape_html(record_id)}</code>")
+        # refresh reminders on any update with dt
+        if dt:
+            delete_reminders_for_record(record_id)
+            schedule_all_reminders(record_id, chat_id, dt, service)
+
+    elif status == "delete":
+        # cancellation
+        if dt:
+            d_h, t_h = human_dt(dt)
+        else:
+            d_h, t_h = ("", "")
+        if not was_sent(record_id, "cancelled"):
+            await send_client(chat_id, tpl_cancelled(d_h or "—", t_h or "—", service), reply_markup=main_menu(), parse_mode="HTML")
+            mark_sent(record_id, "cancelled", {"chat_id": chat_id})
+            await notify_admin(f"<b>❌ Отбивка об отмене отправлена</b><br/>chat_id: <code>{chat_id}</code><br/>record_id: <code>{escape_html(record_id)}</code>")
+        delete_reminders_for_record(record_id)
+
+    return {"ok": True}
+
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
     update = await request.json()
-    message = update.get("message")
-    if not message and "callback_query" not in update:
-        return JSONResponse(content={"ok": True})
 
-    # callbacks
+    # callback buttons
     if "callback_query" in update:
         cq = update["callback_query"]
         chat_id = cq.get("message", {}).get("chat", {}).get("id")
@@ -605,8 +603,8 @@ async def telegram_webhook(request: Request):
         if data == "menu:to_admin":
             st = get_state(chat_id)
             set_state(chat_id, "chat_to_admin", st.get("data", {}))
-            await send_client(chat_id, "Напишите сообщение — я перешлю администратору.", meta="TO_ADMIN")
-            return JSONResponse(content={"ok": True})
+            await send_client(chat_id, "Напишите сообщение — я перешлю администратору.", reply_markup=main_menu(), parse_mode="HTML")
+            return {"ok": True}
 
         if data == "menu:link_phone":
             st = get_state(chat_id)
@@ -616,66 +614,73 @@ async def telegram_webhook(request: Request):
                 "Нажмите кнопку ниже, чтобы отправить номер телефона (нужно для напоминаний о записи).",
                 reply_markup={"keyboard": [[{"text": "📱 Отправить номер", "request_contact": True}]],
                               "resize_keyboard": True, "one_time_keyboard": True},
-                meta="LINK_PHONE",
+                parse_mode="HTML",
             )
-            return JSONResponse(content={"ok": True})
+            return {"ok": True}
 
-        return JSONResponse(content={"ok": True})
+        return {"ok": True}
 
-    chat_id = message["chat"]["id"]
+    message = update.get("message")
+    if not message:
+        return {"ok": True}
+
+    chat_id = int(message["chat"]["id"])
     text = (message.get("text") or "").strip()
-
-    # контакт
     contact = message.get("contact")
+
+    # /chatid helper
+    if text.startswith("/chatid"):
+        await send_client(chat_id, f"chat_id: <code>{chat_id}</code>", parse_mode="HTML")
+        await notify_admin(f"<b>CHATID</b><br/>chat_id: <code>{chat_id}</code>")
+        return {"ok": True}
+
+    # contact received
     if contact:
         phone = normalize_phone(contact.get("phone_number", "")) or contact.get("phone_number", "")
+        set_phone_map(phone, chat_id)
         st = get_state(chat_id)
-        data_mem = st.get("data", {})
-        data_mem["phone"] = phone
-        set_state(chat_id, "idle", data_mem)
-        await notify_admin(f"<b>📱 Клиент отправил контакт</b><br/>chat_id: <code>{chat_id}</code><br/>тел: <code>{escape_html(phone)}</code>")
-        await send_client(chat_id, "Спасибо! Номер сохранён.", reply_markup=main_menu(), meta="CONTACT_SAVED")
-        return JSONResponse(content={"ok": True})
+        set_state(chat_id, "idle", st.get("data", {}))
+        await notify_admin(f"<b>📱 Привязка номера</b><br/>chat_id: <code>{chat_id}</code><br/>тел: <code>{escape_html(phone)}</code>")
+        await send_client(chat_id, "Спасибо! Номер сохранён.", reply_markup=main_menu(), parse_mode="HTML")
+        return {"ok": True}
 
-    # привет
+    # greeting
     if text.lower() in ("/start", "start", "привет", "здравствуйте", "добрый день", "добрый вечер"):
-        await show_welcome(chat_id)
-        return JSONResponse(content={"ok": True})
+        await send_client(chat_id, WELCOME_TEXT, reply_markup=main_menu(), parse_mode="HTML")
+        return {"ok": True}
 
-    # номер текстом
+    # phone as text
     ph = normalize_phone(text)
     if ph:
-        st = get_state(chat_id)
-        data_mem = st.get("data", {})
-        data_mem["phone"] = ph
-        set_state(chat_id, "idle", data_mem)
-        await notify_admin(f"<b>📱 Клиент прислал номер текстом</b><br/>chat_id: <code>{chat_id}</code><br/>тел: <code>{escape_html(ph)}</code>")
-        await send_client(chat_id, "Спасибо! Номер сохранён.", reply_markup=main_menu(), meta="PHONE_SAVED_TEXT")
-        return JSONResponse(content={"ok": True})
+        set_phone_map(ph, chat_id)
+        await notify_admin(f"<b>📱 Привязка номера (текст)</b><br/>chat_id: <code>{chat_id}</code><br/>тел: <code>{escape_html(ph)}</code>")
+        await send_client(chat_id, "Спасибо! Номер сохранён.", reply_markup=main_menu(), parse_mode="HTML")
+        return {"ok": True}
 
-    # подтверждение/отмена клиентом
+    # confirmation / cancel markers
     if text in ("+", "＋"):
-        await notify_admin(f"<b>✅ Подтверждение визита</b><br/>chat_id: <code>{chat_id}</code>")
-        await send_client(chat_id, "Спасибо! Визит подтверждён ✅", reply_markup=main_menu(), meta="CLIENT_CONFIRM")
-        return JSONResponse(content={"ok": True})
-    if text in ("-", "–", "—"):
-        await notify_admin(f"<b>❗️Клиент хочет отменить/перенести</b><br/>chat_id: <code>{chat_id}</code>")
-        await send_client(chat_id, "Поняла. Я передала администратору — мы свяжемся с вами 🙌", reply_markup=main_menu(), meta="CLIENT_CANCEL_REQUEST")
-        return JSONResponse(content={"ok": True})
+        await send_client(chat_id, "Спасибо! Визит подтверждён ✅", reply_markup=main_menu(), parse_mode="HTML")
+        await notify_admin(f"<b>✅ Подтверждение</b><br/>chat_id: <code>{chat_id}</code>")
+        return {"ok": True}
 
-    # сообщение админу
+    if text in ("-", "−", "–"):
+        await send_client(chat_id, "Поняла. Передала администратору запрос на отмену/перенос записи. 💬", reply_markup=main_menu(), parse_mode="HTML")
+        await notify_admin(f"<b>⚠️ Запрос отмены/переноса</b><br/>chat_id: <code>{chat_id}</code>")
+        return {"ok": True}
+
+    # chat to admin mode
     st = get_state(chat_id)
     if st.get("step") == "chat_to_admin":
         await notify_admin(f"<b>📩 Входящее от клиента</b><br/>chat_id: <code>{chat_id}</code><br/>{escape_html(text)[:3500]}")
-        await send_client(chat_id, "Сообщение передано администратору. Ответим вам в этом чате.", reply_markup=main_menu(), meta="MSG_TO_ADMIN_OK")
+        await send_client(chat_id, "Сообщение передано администратору. Ответим вам в этом чате.", reply_markup=main_menu(), parse_mode="HTML")
         set_state(chat_id, "idle", st.get("data", {}))
-        return JSONResponse(content={"ok": True})
+        return {"ok": True}
 
-    # дефолт
+    # default
     await send_client(
         chat_id,
         "Принято.\n\nЧтобы записаться — нажмите «Онлайн-запись».\nЕсли нужен администратор — нажмите «Написать администратору».",
         reply_markup=main_menu(),
-        meta="DEFAULT_REPLY",
+        parse_mode="HTML",
     )
-    return JSONResponse(content={"ok": True})
+    return {"ok": True}
